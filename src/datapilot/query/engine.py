@@ -27,12 +27,16 @@ class DuckDBEngine:
             self.ensure_seeded()
 
     def ensure_seeded(self) -> None:
+        need_seed = False
         try:
-            n = self.conn.execute("SELECT count(*) FROM ads_dau_daily").fetchone()[0]
-            if n and n > 0:
-                return
+            n = self.conn.execute("SELECT count(*) FROM ads_dau_di").fetchone()[0]
+            if not n:
+                need_seed = True
         except Exception:
-            pass
+            need_seed = True
+        # migrate away from legacy flat names if still present alone
+        if not need_seed:
+            return
         seed_demo_data(self.conn)
 
     def execute(self, sql: str) -> QueryResult:

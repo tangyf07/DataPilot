@@ -29,54 +29,107 @@ def _date_predicate(time_hint: str | None, col: str = "dt") -> str:
     return f"{col} = (SELECT max({col}) FROM {{table}})"
 
 
+def _server_clause(server_id: int | None) -> str | None:
+    if server_id is None:
+        return None
+    return f"server_id = {int(server_id)}"
+
+
 def _mock_sql(intent: Intent, docs: list[RetrievedDoc], feedback: str | None = None) -> SQLGeneration:
     metric = intent.metric or "dau"
     time_hint = intent.time_hint or "latest"
-    platform = intent.platform
+    server_id = getattr(intent, "server_id", None)
 
     prompt = (
         f"[mock] intent={intent.name} metric={metric} time={time_hint} "
-        f"platform={platform} docs={[d.doc_id for d in docs]}"
+        f"server_id={server_id} docs={[d.doc_id for d in docs]}"
     )
     if feedback:
         prompt += f"\n[retry_feedback] {feedback}"
 
-    # On retry feedback, prefer simpler / safer SELECT (All platform, known tables).
-    safer = bool(feedback)
+    sid = _server_clause(server_id)
 
     if metric == "dau":
-        table = "ads_dau_daily"
+        table = "ads_dau_di"
         pred = _date_predicate(time_hint).format(table=table)
         where = [pred]
-        if platform and not safer:
-            where.append(f"platform = '{platform}'")
-        else:
-            where.append("platform = 'All'")
-        sql = f"SELECT dt, platform, dau FROM {table} WHERE " + " AND ".join(where) + " ORDER BY dt"
-    elif metric == "retention":
-        table = "ads_retention_daily"
-        pred = _date_predicate(time_hint).format(table=table)
+        if sid:
+            where.append(sid)
         sql = (
-            f"SELECT dt, retention_d1, retention_d7 FROM {table} "
-            f"WHERE {pred} ORDER BY dt"
+            f"SELECT dt, server_id, dau, metric_id FROM {table} WHERE "
+            + " AND ".join(where)
+            + " ORDER BY dt, server_id"
         )
-    elif metric in ("arpu", "pay_rate", "revenue", "pay_users"):
-        table = "ads_revenue_daily"
+    elif metric == "retention":
+        table = "ads_retention_nd"
+        pred = _date_predicate(time_hint, col="cohort_dt").format(table=table)
+        where = [pred, "n_days IN (1, 3, 7)"]
+        if sid:
+            where.append(sid)
+        sql = (
+            f"SELECT cohort_dt, server_id, n_days, cohort_size, retained_cnt, "
+            f"retention_rate, metric_id FROM {table} WHERE "
+            + " AND ".join(where)
+            + " ORDER BY cohort_dt, server_id, n_days"
+        )
+    elif metric in ("arpu", "revenue"):
+        table = "ads_arpu_di"
         pred = _date_predicate(time_hint).format(table=table)
-        cols = {
-            "arpu": "dt, arpu, revenue, pay_users",
-            "pay_rate": "dt, pay_rate, pay_users, revenue",
-            "revenue": "dt, revenue, pay_users, arpu, pay_rate",
-            "pay_users": "dt, pay_users, revenue, pay_rate",
-        }[metric]
-        sql = f"SELECT {cols} FROM {table} WHERE {pred} ORDER BY dt"
+        where = [pred]
+        if sid:
+            where.append(sid)
+        sql = (
+            f"SELECT dt, server_id, dau, revenue_cny, arpu_cny, metric_id FROM {table} WHERE "
+            + " AND ".join(where)
+            + " ORDER BY dt, server_id"
+        )
+    elif metric in ("pay_rate", "pay_users"):
+        table = "ads_pay_rate_di"
+        pred = _date_predicate(time_hint).format(table=table)
+        where = [pred]
+        if sid:
+            where.append(sid)
+        sql = (
+            f"SELECT dt, server_id, dau, pay_users, pay_rate, metric_id FROM {table} WHERE "
+            + " AND ".join(where)
+            + " ORDER BY dt, server_id"
+        )
+    elif metric == "online_duration":
+        table = "ads_online_duration_di"
+        pred = _date_predicate(time_hint).format(table=table)
+        where = [pred]
+        if sid:
+            where.append(sid)
+        sql = (
+            f"SELECT dt, server_id, total_online_sec, players, avg_online_sec, metric_id "
+            f"FROM {table} WHERE " + " AND ".join(where) + " ORDER BY dt, server_id"
+        )
+    elif metric == "dungeon_clear":
+        table = "ads_dungeon_clear_rate_di"
+        pred = _date_predicate(time_hint).format(table=table)
+        where = [pred]
+        if sid:
+            where.append(sid)
+        sql = (
+            f"SELECT dt, server_id, dungeon_id, enter_cnt, clear_cnt, clear_rate, metric_id "
+            f"FROM {table} WHERE " + " AND ".join(where) + " ORDER BY dt, server_id, dungeon_id"
+        )
+    elif metric == "churn":
+        table = "ads_churn_di"
+        pred = _date_predicate(time_hint).format(table=table)
+        where = [pred]
+        if sid:
+            where.append(sid)
+        sql = (
+            f"SELECT dt, server_id, active_7d_users, churn_risk_users, churn_risk_rate, metric_id "
+            f"FROM {table} WHERE " + " AND ".join(where) + " ORDER BY dt, server_id"
+        )
     else:
         sql = (
-            "SELECT dt, platform, dau FROM ads_dau_daily "
-            "WHERE dt = (SELECT max(dt) FROM ads_dau_daily) AND platform = 'All' ORDER BY dt"
+            "SELECT dt, server_id, dau, metric_id FROM ads_dau_di "
+            "WHERE dt = (SELECT max(dt) FROM ads_dau_di) ORDER BY dt, server_id"
         )
 
-    # Hard enforce single SELECT (strip any accidental multi-stmt / DDL from feedback paths).
     sql = sql.strip().rstrip(";").split(";")[0].strip()
     mode = "mock_retry" if feedback else "mock"
     return SQLGeneration(sql=sql, model="mock-rules-v1", prompt=prompt, mode=mode)
@@ -90,7 +143,9 @@ def _openai_sql(
 ) -> SQLGeneration:
     schema_blob = "\n\n".join(f"### {d.title}\n{d.content}" for d in docs)
     prompt = (
-        "You are a SQL generator for DuckDB over GameStream-like ADS tables.\n"
+        "You are a SQL generator for DuckDB over GameStream ADS tables "
+        "(ads_dau_di, ads_retention_nd, ads_arpu_di, ads_pay_rate_di, ...).\n"
+        "Always include metric_id when selecting. No platform column. Use server_id.\n"
         "Return ONLY one SELECT statement. No DDL/DML.\n\n"
         f"Schema docs:\n{schema_blob}\n\n"
         f"Intent: {intent}\n"
@@ -138,7 +193,6 @@ def generate_sql(
 ) -> SQLGeneration:
     """Generate SQL. On feedback (gate/query failure), regenerate safer SELECT (max 1 retry upstream)."""
     if getattr(settings, "llm_mode", "mock") == "openai" and getattr(settings, "openai_api_key", None):
-        # Retry path prefers deterministic mock SELECT for demo reliability.
         if feedback:
             return _mock_sql(intent, docs, feedback=feedback)
         return _openai_sql(intent, docs, settings, feedback=None)

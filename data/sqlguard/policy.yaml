@@ -1,4 +1,4 @@
-# DataPilot demo: allow SELECT on ADS tables; block destructive writes.
+# DataPilot demo: allow SELECT on GameStream ADS tables; block destructive writes.
 environment: demo
 rules:
   select: allow
@@ -12,9 +12,13 @@ limits:
 permissions:
   enforce: true
   tables:
-    ads_dau_daily: [select]
-    ads_retention_daily: [select]
-    ads_revenue_daily: [select]
+    ads_dau_di: [select]
+    ads_retention_nd: [select]
+    ads_arpu_di: [select]
+    ads_pay_rate_di: [select]
+    ads_online_duration_di: [select]
+    ads_dungeon_clear_rate_di: [select]
+    ads_churn_di: [select]
 hallucination:
   allow_unknown_tables: false
   allow_unknown_columns: false

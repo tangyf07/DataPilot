@@ -1,31 +1,48 @@
 # DataPilot
 
-Intelligent query layer for an AI data-eng stack: **GameStream** (metrics/schema lakehouse) → **DataPilot** (intent → RAG → Text2SQL → explain) → **SQLGuard** (pre-exec gate). Not a bare RAG/ChatBI homework demo.
+AI 数据工程体系的智能查数层：对接 [GameStream](https://github.com/tangyf07/GameStream) 的 ADS 指标口径，经 [SQLGuard (sql-write-gate)](https://github.com/tangyf07/sql-write-gate) 门禁后查数解释。不是裸 Text2SQL / 普通 ChatBI 作业。
 
-## Loop
+## 三件套架构
 
-1. Intent recognition  
-2. Schema/metrics RAG (`MockGameStreamRetriever`; real GameStream reserved)  
-3. Text2SQL (mock rules or OpenAI-compatible)  
-4. **SQLGuard** check — on BLOCK, **one feedback retry** (safer SELECT)  
-5. DuckDB execute — on query/validation failure, **one feedback retry**  
-6. Validate → NL conclusion + ASCII table (optional chart if matplotlib)  
-7. Observability trace (`traces/`)
+```mermaid
+flowchart LR
+  GS[GameStream<br/>实时湖仓 ADS] --> DP[DataPilot<br/>智能查数层]
+  DP -->|SQL| SG[SQLGuard<br/>sql-write-gate]
+  SG -->|EXECUTE| DB[(DuckDB / Doris)]
+  SG -->|BLOCK| R[反馈重试]
+  R --> DP
+```
 
-Max attempts: **2** (1 retry).
+（与网易秋招三件套同一叙事：GameStream 出数 → DataPilot 问数 → SQLGuard 护栏。）
+
+## 闭环
+
+1. Intent（指标 / 时间 / 可选 server_id）
+2. Schema/metrics RAG（`MockGameStreamRetriever`；真实 GameStream 预留）
+3. Text2SQL（mock 规则或 OpenAI 兼容）
+4. **SQLGuard** 门禁 — BLOCK 时 **一次反馈重试**
+5. DuckDB 执行 — 失败再反馈重试一次
+6. 校验 → 自然语言结论 + 表
+7. Trace（`traces/`）
+
+最多 **2** 次尝试（1 次重试）。
+
+## 指标对齐
+
+口径以 GameStream `config/metrics.yaml` + `sql/metrics/` 为准；本仓 seed / RAG / catalog 使用同一 `metric_id` 与表名（`ads_dau_di`、`ads_retention_nd`、`ads_arpu_di`、`ads_pay_rate_di` 等）。Vendored 副本：`data/gamestream/metrics.yaml`。
 
 ## Quickstart
 
 ```bash
 pip install -e ".[dev]"
-# optional real gate:
+# 可选真实门禁：
 pip install -e ".[sqlguard]"   # or: pip install -e /path/to/sql-write-gate
 python -m datapilot demo
 python -m datapilot "昨天DAU多少？"
 pytest -q
 ```
 
-No API key needed (`DATAPILOT_LLM_MODE=mock`).
+默认 `DATAPILOT_LLM_MODE=mock`，无需 API Key。
 
 ## Env
 
@@ -33,23 +50,18 @@ No API key needed (`DATAPILOT_LLM_MODE=mock`).
 |----------|---------|--------|
 | `DATAPILOT_LLM_MODE` | `mock` | or `openai` |
 | `OPENAI_API_KEY` / `BASE_URL` / `MODEL` | — | OpenAI-compatible |
-| `DATAPILOT_DB_PATH` | `./data/datapilot.duckdb` | DuckDB file |
+| `DATAPILOT_DB_PATH` | `./data/datapilot.duckdb` | DuckDB |
 | `DATAPILOT_GUARD_MODE` | `auto` | `auto`\|`write_gate`\|`http`\|`mock` |
-| `DATAPILOT_GUARD_URL` | — | HTTP base for `POST /v1/check` |
 | `DATAPILOT_GUARD_CATALOG` | `./data/sqlguard/catalog.json` | ADS catalog |
-| `DATAPILOT_GUARD_POLICY` | `./data/sqlguard/policy.yaml` | demo SELECT policy |
+| `DATAPILOT_GUARD_POLICY` | `./data/sqlguard/policy.yaml` | SELECT policy |
+| `DATAPILOT_GAMESTREAM_METRICS` | `./data/gamestream/metrics.yaml` | optional metrics path |
 | `DATAPILOT_TRACE_DIR` | `./traces` | JSON traces |
-
-## DuckDB seed
-
-Tables: `ads_dau_daily`, `ads_retention_daily`, `ads_revenue_daily` (~14 days).
 
 ## SQLGuard
 
-Default **`auto`**: prefers real **SQLGuard 1.1** DataPilot `BLOCK`/`EXECUTE` when `sql-write-gate` is installed (module → HTTP → CLI). **Mock** remains fallback only. See `docs/sqlguard_contract.md`.
+默认 **`auto`**：已安装 `sql-write-gate` 时走真实 1.1 DataPilot `BLOCK`/`EXECUTE`。Mock 仅作回退。见 `docs/sqlguard_contract.md`。
 
-Ship `data/sqlguard/` so ADS `SELECT`s are not schema-hallucination BLOCKed.
+## English
 
-## Layout
+DataPilot is the intelligent query layer in an AI data-eng suite: it consumes GameStream ADS metric contracts (`metric_id` / table names), gates SQL via SQLGuard (`sql-write-gate`), then explains results. Not bare Text2SQL / ChatBI homework.
 
-`intent` · `rag` · `sql` · `guard` · `query` · `report` · `observe` · `pipeline` · `cli`

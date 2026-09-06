@@ -29,7 +29,8 @@ def client() -> WriteGateSQLGuardClient:
 
 def test_select_ads_execute(client: WriteGateSQLGuardClient) -> None:
     r = client.check(
-        "SELECT dau, platform FROM ads_dau_daily WHERE platform = 'All' ORDER BY dt DESC LIMIT 1"
+        "SELECT dt, server_id, dau, metric_id FROM ads_dau_di "
+        "WHERE dt = current_date - INTERVAL 1 DAY ORDER BY server_id"
     )
     assert r.datapilot == "EXECUTE"
     assert r.action == "ALLOW"
@@ -38,13 +39,13 @@ def test_select_ads_execute(client: WriteGateSQLGuardClient) -> None:
 
 
 def test_delete_ads_block(client: WriteGateSQLGuardClient) -> None:
-    r = client.check("DELETE FROM ads_dau_daily")
+    r = client.check("DELETE FROM ads_dau_di")
     assert r.datapilot == "BLOCK"
     assert r.action == "BLOCK"
     assert r.allowed is False
 
 
 def test_drop_ads_block(client: WriteGateSQLGuardClient) -> None:
-    r = client.check("DROP TABLE ads_dau_daily")
+    r = client.check("DROP TABLE ads_dau_di")
     assert r.datapilot == "BLOCK"
     assert r.allowed is False

@@ -21,7 +21,8 @@ def _print_result(result) -> None:
     print(f"Question : {result.question}")
     print(
         f"Intent   : {result.intent.name} metric={result.intent.metric} "
-        f"time={result.intent.time_hint} conf={result.intent.confidence}"
+        f"time={result.intent.time_hint} server_id={result.intent.server_id} "
+        f"conf={result.intent.confidence}"
     )
     print("RAG docs :")
     for d in result.docs:

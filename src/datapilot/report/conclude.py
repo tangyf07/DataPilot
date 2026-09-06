@@ -8,6 +8,19 @@ from typing import Any
 
 from datapilot.intent import Intent
 
+# logical metric → preferred result column (GameStream ADS names)
+_METRIC_VALUE_COLS: dict[str, tuple[str, ...]] = {
+    "dau": ("dau",),
+    "retention": ("retention_rate", "retained_cnt"),
+    "arpu": ("arpu_cny", "revenue_cny"),
+    "revenue": ("revenue_cny", "arpu_cny"),
+    "pay_rate": ("pay_rate", "pay_users"),
+    "pay_users": ("pay_users", "pay_rate"),
+    "online_duration": ("avg_online_sec", "total_online_sec"),
+    "dungeon_clear": ("clear_rate", "clear_cnt"),
+    "churn": ("churn_risk_rate", "churn_risk_users"),
+}
+
 
 @dataclass
 class Report:
@@ -34,32 +47,42 @@ def _fmt_table(columns: list[str], rows: list[tuple[Any, ...]], max_rows: int = 
     return "\n".join([header, sep, *body]) + extra
 
 
+def _pick_value(metric: str | None, columns: list[str], first: tuple[Any, ...]) -> tuple[str | None, Any]:
+    cols_l = [c.lower() for c in columns]
+    if metric:
+        for cand in _METRIC_VALUE_COLS.get(metric, (metric,)):
+            if cand.lower() in cols_l:
+                i = cols_l.index(cand.lower())
+                return columns[i], first[i]
+        for i, c in enumerate(cols_l):
+            if metric in c:
+                return columns[i], first[i]
+    # skip id / dim columns when falling back
+    skip = {"dt", "date", "day", "cohort_dt", "server_id", "metric_id", "n_days", "dungeon_id"}
+    for i in range(len(columns) - 1, -1, -1):
+        if cols_l[i] not in skip:
+            return columns[i], first[i]
+    if len(columns) >= 2:
+        return columns[-1], first[-1]
+    return (columns[0], first[0]) if columns else (None, None)
+
+
 def _nl(intent: Intent, columns: list[str], rows: list[tuple[Any, ...]], ok: bool) -> str:
     if not ok or not rows:
         return f"未能从结果中得到有效数据（问题：{intent.raw}）。请检查时间范围或指标。"
     metric = intent.metric or "指标"
     first = rows[0]
-    # try find metric-like column
-    label = None
-    value = None
-    for i, c in enumerate(columns):
-        cl = c.lower()
-        if metric and metric in cl:
-            label, value = c, first[i]
-            break
-    if label is None and len(columns) >= 2:
-        label, value = columns[-1], first[-1]
+    label, value = _pick_value(intent.metric, columns, first)
     dt = None
     for i, c in enumerate(columns):
-        if c.lower() in ("dt", "date", "day"):
+        if c.lower() in ("dt", "date", "day", "cohort_dt"):
             dt = first[i]
             break
     time_part = f"（日期 {dt}）" if dt is not None else ""
     if len(rows) == 1:
         return f"根据查询，{metric}{time_part}为 **{value}**（字段 {label}）。共返回 {len(rows)} 行。"
-    # trend hint
     return (
-        f"根据查询，已返回近 {len(rows)} 天的 {metric} 数据{time_part}。"
+        f"根据查询，已返回 {len(rows)} 行 {metric} 数据{time_part}。"
         f"首行 {label}={value}；详见下表。"
     )
 
@@ -76,9 +99,11 @@ def _maybe_chart(columns: list[str], rows: list[tuple[Any, ...]], out_dir: Path)
         return None
     try:
         x = [r[0] for r in rows]
-        # pick last numeric-ish col
         y_idx = len(columns) - 1
+        skip = {"metric_id", "server_id", "n_days", "dungeon_id"}
         for i in range(len(columns) - 1, 0, -1):
+            if columns[i].lower() in skip:
+                continue
             if all(isinstance(r[i], (int, float)) and not isinstance(r[i], bool) for r in rows):
                 y_idx = i
                 break
