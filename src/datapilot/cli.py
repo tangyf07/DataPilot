@@ -30,8 +30,10 @@ def _print_result(result) -> None:
         print(f"Model    : {result.sql_gen.model} ({result.sql_gen.mode})")
         print(f"SQL      : {result.sql_gen.sql}")
     if result.gate:
+        dp = f" datapilot={result.gate.datapilot}" if result.gate.datapilot else ""
+        rs = f" risk_score={result.gate.risk_score}" if result.gate.risk_score is not None else ""
         print(
-            f"Gate     : {result.gate.action} allowed={result.gate.allowed} "
+            f"Gate     : {result.gate.action}{dp}{rs} allowed={result.gate.allowed} "
             f"rule={result.gate.rule_id} — {result.gate.reason}"
         )
     if result.retries:

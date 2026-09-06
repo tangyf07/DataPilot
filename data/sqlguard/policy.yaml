@@ -1,0 +1,20 @@
+# DataPilot demo: allow SELECT on ADS tables; block destructive writes.
+environment: demo
+rules:
+  select: allow
+  insert: approval
+  update: approval
+  delete: block
+  ddl: block
+limits:
+  update_rows: 100
+  delete_rows: 50
+permissions:
+  enforce: true
+  tables:
+    ads_dau_daily: [select]
+    ads_retention_daily: [select]
+    ads_revenue_daily: [select]
+hallucination:
+  allow_unknown_tables: false
+  allow_unknown_columns: false

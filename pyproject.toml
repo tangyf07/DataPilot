@@ -17,7 +17,7 @@ dependencies = [
 openai = ["openai>=1.0.0"]
 chart = ["matplotlib>=3.7.0"]
 dev = ["pytest>=7.0.0"]
-sqlguard = []  # optional: pip install sql-write-gate when available
+sqlguard = ["sql-write-gate>=1.1.0"]
 
 [project.scripts]
 datapilot = "datapilot.cli:main"

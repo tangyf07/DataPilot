@@ -48,6 +48,8 @@ class PipelineResult:
                 "action": self.gate.action,
                 "reason": self.gate.reason,
                 "rule_id": self.gate.rule_id,
+                "datapilot": self.gate.datapilot,
+                "risk_score": self.gate.risk_score,
             }
             if self.gate
             else None,
@@ -65,7 +67,13 @@ class Pipeline:
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or get_settings()
         self.retriever = MockGameStreamRetriever()
-        self.guard = build_guard_client(self.settings.guard_mode)
+        self.guard = build_guard_client(
+            self.settings.guard_mode,
+            guard_url=self.settings.guard_url,
+            catalog_path=self.settings.guard_catalog,
+            policy_path=self.settings.guard_policy,
+            db_path=self.settings.db_path,
+        )
         self.engine = DuckDBEngine(self.settings.db_path, auto_seed=True)
         self.tracer = Tracer(self.settings.trace_dir)
 
@@ -117,6 +125,9 @@ class Pipeline:
                 "rule_id": gate.rule_id,
                 "reason": gate.reason,
                 "risk": gate.risk,
+                "datapilot": gate.datapilot,
+                "risk_score": gate.risk_score,
+                "latency_ms": gate.latency_ms,
                 "attempt": attempts,
             }
             step.finish(**run.gate)

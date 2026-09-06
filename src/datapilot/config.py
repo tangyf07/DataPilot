@@ -26,6 +26,9 @@ class Settings:
     guard_mode: str
     trace_dir: Path
     project_root: Path
+    guard_url: str | None = None
+    guard_catalog: Path | None = None
+    guard_policy: Path | None = None
 
     @classmethod
     def load(cls) -> "Settings":
@@ -36,15 +39,27 @@ class Settings:
             mode = "openai" if key else "mock"
         db = os.getenv("DATAPILOT_DB_PATH", str(root / "data" / "datapilot.duckdb"))
         trace = os.getenv("DATAPILOT_TRACE_DIR", str(root / "traces"))
+        catalog = os.getenv(
+            "DATAPILOT_GUARD_CATALOG",
+            str(root / "data" / "sqlguard" / "catalog.json"),
+        )
+        policy = os.getenv(
+            "DATAPILOT_GUARD_POLICY",
+            str(root / "data" / "sqlguard" / "policy.yaml"),
+        )
+        guard_url = (os.getenv("DATAPILOT_GUARD_URL") or "").strip() or None
         return cls(
             llm_mode=mode.lower(),
             openai_api_key=key,
             openai_base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1"),
             openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
             db_path=Path(db),
-            guard_mode=os.getenv("DATAPILOT_GUARD_MODE", "mock").lower(),
+            guard_mode=os.getenv("DATAPILOT_GUARD_MODE", "auto").lower(),
             trace_dir=Path(trace),
             project_root=root,
+            guard_url=guard_url,
+            guard_catalog=Path(catalog) if catalog else None,
+            guard_policy=Path(policy) if policy else None,
         )
 
 

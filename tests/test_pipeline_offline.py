@@ -32,6 +32,9 @@ def settings() -> Settings:
         guard_mode="mock",
         trace_dir=base / "traces",
         project_root=base,
+        guard_url=None,
+        guard_catalog=None,
+        guard_policy=None,
     )
 
 

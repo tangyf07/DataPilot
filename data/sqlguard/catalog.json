@@ -1,0 +1,47 @@
+{
+  "as_of_date": "2026-09-06",
+  "freshness_days": 30,
+  "tables": {
+    "ads_dau_daily": {
+      "writable": false,
+      "stale": false,
+      "partition_column": "dt",
+      "columns": {
+        "dt": "DATE",
+        "dau": "BIGINT",
+        "platform": "VARCHAR"
+      },
+      "allowed_write_columns": [],
+      "pii_columns": [],
+      "restricted_columns": []
+    },
+    "ads_retention_daily": {
+      "writable": false,
+      "stale": false,
+      "partition_column": "dt",
+      "columns": {
+        "dt": "DATE",
+        "retention_d1": "DOUBLE",
+        "retention_d7": "DOUBLE"
+      },
+      "allowed_write_columns": [],
+      "pii_columns": [],
+      "restricted_columns": []
+    },
+    "ads_revenue_daily": {
+      "writable": false,
+      "stale": false,
+      "partition_column": "dt",
+      "columns": {
+        "dt": "DATE",
+        "revenue": "DOUBLE",
+        "pay_users": "BIGINT",
+        "arpu": "DOUBLE",
+        "pay_rate": "DOUBLE"
+      },
+      "allowed_write_columns": [],
+      "pii_columns": [],
+      "restricted_columns": []
+    }
+  }
+}
