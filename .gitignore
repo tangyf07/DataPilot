@@ -18,3 +18,4 @@ traces/*.jsonl
 !docs/*.png
 .DS_Store
 Thumbs.db
+.pytest_work/

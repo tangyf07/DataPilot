@@ -14,16 +14,24 @@ from datapilot.sql.generator import SQLGeneration, generate_sql
 
 
 @pytest.fixture()
-def settings(tmp_path: Path) -> Settings:
+def settings() -> Settings:
+    # Project-local work dir avoids Windows PermissionError on %TEMP%/pytest-of-*
+    import shutil
+    root = Path(__file__).resolve().parents[1] / ".pytest_work"
+    root.mkdir(exist_ok=True)
+    base = root / "offline"
+    if base.exists():
+        shutil.rmtree(base, ignore_errors=True)
+    base.mkdir(parents=True, exist_ok=True)
     return Settings(
         llm_mode="mock",
         openai_api_key=None,
         openai_base_url="https://api.openai.com/v1",
         openai_model="gpt-4o-mini",
-        db_path=tmp_path / "test.duckdb",
+        db_path=base / "test.duckdb",
         guard_mode="mock",
-        trace_dir=tmp_path / "traces",
-        project_root=tmp_path,
+        trace_dir=base / "traces",
+        project_root=base,
     )
 
 
