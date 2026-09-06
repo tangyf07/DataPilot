@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "datapilot"
+version = "0.1.0"
+description = "LLM Agent ChatBI loop for data query (not bare Text2SQL)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "duckdb>=1.0.0",
+  "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+openai = ["openai>=1.0.0"]
+chart = ["matplotlib>=3.7.0"]
+dev = ["pytest>=7.0.0"]
+sqlguard = []  # optional: pip install sql-write-gate when available
+
+[project.scripts]
+datapilot = "datapilot.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
