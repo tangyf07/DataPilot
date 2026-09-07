@@ -49,6 +49,10 @@ pytest -q
 
 三件套真实链路（无 UI）：DataPilot 生成 ADS SQL → **SQLGuard 1.1** `block_or_execute(execute=True)` → Doris FE（MySQL 协议）查 `ads` 库。
 
+**Live Doris demo evidence:** the G7 demo ran **two SELECTs each returning 8 rows** (DAU + pay_rate). That live demo is separate from offline unit tests — **`pytest passed` is not proof of Doris integration**.
+
+Business calendar timezone for time intents (`今天` / `昨天` / `近7天`): **Asia/Shanghai**. `last_7_days` = inclusive window **[today-6d, today]** (7 calendar days including today).
+
 ```bash
 # Windows 本机 Doris FE 已起时：
 pip install -e ".[dev,sqlguard,doris]"   # pymysql + sql-write-gate
@@ -68,8 +72,8 @@ python -m datapilot g7
 
 - 指标：`ads_dau_di` / `ads_pay_rate_di`（与 GameStream metric_id 对齐）
 - 门禁 catalog 使用**未限定表名** + `database=ads`（避免 `ads.ads_dau_di` 权限匹配失败）
-- Trace 中 `query_path`：`sqlguard_execute` 或回退 `sqlguard_check_then_pymysql`
-- 离线仍用 DuckDB seed：`DATAPILOT_QUERY_BACKEND=duckdb pytest -q`
+- Trace 中 `query_path`：`sqlguard_execute`，或 gate 已 ALLOW 但未物化行时的 post-ALLOW `sqlguard_check_then_pymysql`（gate BLOCK/异常时**不会** pymysql 旁路）
+- 离线单元测试（DuckDB seed）：`DATAPILOT_QUERY_BACKEND=duckdb pytest -q` — 与 live Doris G7 demo 分开验证
 
 ## Env
 
@@ -88,7 +92,7 @@ python -m datapilot g7
 
 ## SQLGuard
 
-默认 **`auto`**：已安装 `sql-write-gate` 时走真实 1.1 DataPilot `BLOCK`/`EXECUTE`。Mock 仅作回退。见 `docs/sqlguard_contract.md`。
+默认 **`auto`**：已安装 `sql-write-gate` 时走真实 1.1 DataPilot `BLOCK`/`EXECUTE`（module → http → cli）。**仅** `DATAPILOT_GUARD_MODE=mock` 使用 Mock；真实模式超时/断连/ImportError 等 → **BLOCK**（`fallback: null`），不会 mock 回退。HTTP：`POST /v1/check` | `POST /v1/execute`（不用 `/v1/datapilot`）。见 `docs/sqlguard_contract.md`。
 
 ## English
 

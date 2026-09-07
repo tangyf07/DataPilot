@@ -34,12 +34,13 @@ payload = block_or_execute(
 
 ## HTTP (`sql-write-gate serve`)
 
+DataPilot HTTP client uses **only**:
+
 - `POST /v1/check` — evaluate only
 - `POST /v1/execute` — evaluate then execute on ALLOW
-- Body: `{"sql": "...", "actor"?, "model_id"?, "prompt_summary"?, "catalog"?, "policy"?}`
-- Response includes `datapilot`, `action`, `risk_score`, `rule_id`, `reason`, …
 
-Also available: thin `write_gate.datapilot.serve_http` (`POST /v1/datapilot`).
+Never `POST /v1/datapilot`. Body: `{"sql": "...", "actor"?, "model_id"?, "prompt_summary"?, "catalog"?, "policy"?}`.
+Response includes `datapilot`, `action`, `risk_score`, `rule_id`, `reason`, …
 
 ## CLI
 
@@ -71,11 +72,13 @@ class SQLGuardClient(Protocol):
 
 | Mode | Behavior |
 |------|----------|
-| `auto` (default) | Prefer real SQLGuard 1.1 (`block_or_execute` → HTTP → CLI → mock) |
-| `write_gate` | Same adapter (explicit) |
-| `http` | Prefer `DATAPILOT_GUARD_URL` `POST /v1/check` |
-| `mock` | `MockSQLGuardClient` only |
+| `auto` (default) | Real SQLGuard 1.1: module → HTTP → CLI; **all fail → BLOCK** (never mock) |
+| `write_gate` | Module only (optional CLI same product family); missing module → BLOCK (never mock) |
+| `http` | `DATAPILOT_GUARD_URL` only: `POST /v1/check` \| `POST /v1/execute` (never mock / never `/v1/datapilot`) |
+| `mock` | `MockSQLGuardClient` only — **only** mode that uses mock |
 
-**Mock remains fallback only** when the real package/URL/CLI is unavailable.
+On timeout / disconnect / ImportError / CLI / HTTP / field contradiction in non-mock modes: return `GateResult.block` with `raw={backend, error, fallback: null}`; pipeline must not execute SQL (`db_execute_count=0`).
+
+Field contradiction: `datapilot=EXECUTE` but `action=BLOCK` (or `allowed=false`) → treat as BLOCK.
 
 Ship ADS catalog + permissive SELECT policy under `data/sqlguard/` so `ads_*` SELECTs are not `schema_hallucination` BLOCKed.

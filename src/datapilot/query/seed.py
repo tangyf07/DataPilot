@@ -121,7 +121,8 @@ def seed_demo_data(conn: Any, days: int = 14, seed: int = 42) -> None:
 
     base_by_server = {0: 45_000, 1: 38_000, 2: 32_000}
     d = start
-    while d < today:
+    # Inclusive through today so "今天" intents have rows (Asia/Shanghai calendar).
+    while d <= today:
         for sid in SERVER_IDS:
             base = base_by_server[sid]
             dau = max(1000, int(base + rng.randint(-2500, 2500)))

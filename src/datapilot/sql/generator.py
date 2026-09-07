@@ -1,8 +1,16 @@
 """SQL generator: mock/rules offline or OpenAI-compatible API.
 
+Business calendar timezone: **Asia/Shanghai** (UTC+8). Date predicates
+(``today`` / ``yesterday`` / ``last_7_days``) use the operator's ``CURRENT_DATE`` /
+``current_date``; run DataPilot in Asia/Shanghai (or align the warehouse clock)
+so "今天" matches the Shanghai calendar day.
+
 Dialects:
   - duckdb: date predicates with ``current_date - INTERVAL``
-  - mysql / doris: portable SELECT (metric_id filter + ORDER BY); avoids DuckDB-only INTERVAL
+  - mysql / doris: portable SELECT with ``DATE_SUB`` predicates from time_hint
+
+``last_7_days`` is the inclusive window **[today-6d, today]** (7 calendar days
+including today). ``yesterday`` = today-1; ``today`` = today.
 """
 
 from __future__ import annotations
@@ -33,16 +41,26 @@ def _dialect(settings: Any) -> str:
 
 
 def _date_predicate(time_hint: str | None, col: str = "dt", *, dialect: str = "duckdb") -> str:
+    """Build a date filter. Business TZ: Asia/Shanghai (see module docstring).
+
+    last_7_days → inclusive [today-6d, today] (7 calendar days including today).
+    """
     if dialect in ("mysql", "doris"):
-        # Doris/MySQL-portable forms
         if time_hint == "yesterday":
             return f"{col} = DATE_SUB(CURRENT_DATE(), INTERVAL 1 DAY)"
         if time_hint == "today":
             return f"{col} = CURRENT_DATE()"
         if time_hint == "last_7_days":
-            return f"{col} >= DATE_SUB(CURRENT_DATE(), INTERVAL 7 DAY)"
+            # inclusive [today-6, today] = 7 days
+            return (
+                f"{col} >= DATE_SUB(CURRENT_DATE(), INTERVAL 6 DAY) "
+                f"AND {col} <= CURRENT_DATE()"
+            )
         if time_hint == "last_14_days":
-            return f"{col} >= DATE_SUB(CURRENT_DATE(), INTERVAL 14 DAY)"
+            return (
+                f"{col} >= DATE_SUB(CURRENT_DATE(), INTERVAL 13 DAY) "
+                f"AND {col} <= CURRENT_DATE()"
+            )
         return f"{col} = (SELECT max({col}) FROM {{table}})"
     # DuckDB
     if time_hint == "yesterday":
@@ -50,9 +68,9 @@ def _date_predicate(time_hint: str | None, col: str = "dt", *, dialect: str = "d
     if time_hint == "today":
         return f"{col} = current_date"
     if time_hint == "last_7_days":
-        return f"{col} >= current_date - INTERVAL 7 DAY"
+        return f"{col} >= current_date - INTERVAL 6 DAY AND {col} <= current_date"
     if time_hint == "last_14_days":
-        return f"{col} >= current_date - INTERVAL 14 DAY"
+        return f"{col} >= current_date - INTERVAL 13 DAY AND {col} <= current_date"
     return f"{col} = (SELECT max({col}) FROM {{table}})"
 
 
@@ -62,24 +80,35 @@ def _server_clause(server_id: int | None) -> str | None:
     return f"server_id = {int(server_id)}"
 
 
-def _portable_ads_sql(metric: str, server_id: int | None = None) -> str | None:
-    """Preferred portable SQL for Doris ADS (G7) — no DuckDB INTERVAL."""
+def _portable_ads_sql(
+    metric: str,
+    server_id: int | None = None,
+    *,
+    time_hint: str | None = None,
+    dialect: str = "mysql",
+) -> str | None:
+    """Preferred portable SQL for Doris ADS (G7) with time_hint date predicates."""
     sid = _server_clause(server_id)
+    th = time_hint or "latest"
     if metric == "dau":
-        where = ["metric_id = 'ads_dau_di'"]
+        table = "ads_dau_di"
+        pred = _date_predicate(th, dialect=dialect).format(table=table)
+        where = [pred, "metric_id = 'ads_dau_di'"]
         if sid:
             where.append(sid)
         return (
-            "SELECT dt, server_id, dau, metric_id FROM ads_dau_di WHERE "
+            f"SELECT dt, server_id, dau, metric_id FROM {table} WHERE "
             + " AND ".join(where)
             + " ORDER BY dt, server_id"
         )
     if metric in ("pay_rate", "pay_users"):
-        where = ["metric_id = 'ads_pay_rate_di'"]
+        table = "ads_pay_rate_di"
+        pred = _date_predicate(th, dialect=dialect).format(table=table)
+        where = [pred, "metric_id = 'ads_pay_rate_di'"]
         if sid:
             where.append(sid)
         return (
-            "SELECT dt, server_id, dau, pay_users, pay_rate, metric_id FROM ads_pay_rate_di WHERE "
+            f"SELECT dt, server_id, dau, pay_users, pay_rate, metric_id FROM {table} WHERE "
             + " AND ".join(where)
             + " ORDER BY dt, server_id"
         )
@@ -99,50 +128,34 @@ def _mock_sql(
 
     prompt = (
         f"[mock] intent={intent.name} metric={metric} time={time_hint} "
-        f"server_id={server_id} dialect={dialect} docs={[d.doc_id for d in docs]}"
+        f"server_id={server_id} dialect={dialect} tz=Asia/Shanghai "
+        f"docs={[d.doc_id for d in docs]}"
     )
     if feedback:
         prompt += f"\n[retry_feedback] {feedback}"
 
-    # G7 / Doris: always use portable ADS SQL for DAU + pay_rate
+    # G7 / Doris: portable ADS SQL with time predicates for DAU + pay_rate
     if dialect in ("mysql", "doris"):
-        portable = _portable_ads_sql(metric, server_id)
+        portable = _portable_ads_sql(
+            metric, server_id, time_hint=time_hint, dialect="mysql"
+        )
         if portable:
             mode = "mock_retry" if feedback else "mock_doris"
             return SQLGeneration(sql=portable, model="mock-rules-v1", prompt=prompt, mode=mode)
-        # other metrics: still avoid DuckDB INTERVAL
-        pass
 
     sid = _server_clause(server_id)
 
     if metric == "dau":
-        # Prefer portable form even on DuckDB so seed + Doris stay aligned
-        if dialect in ("mysql", "doris") or time_hint in ("latest", None):
-            portable = _portable_ads_sql("dau", server_id)
-            if portable and dialect in ("mysql", "doris"):
-                sql = portable
-            else:
-                table = "ads_dau_di"
-                pred = _date_predicate(time_hint, dialect=dialect).format(table=table)
-                where = [pred]
-                if sid:
-                    where.append(sid)
-                sql = (
-                    f"SELECT dt, server_id, dau, metric_id FROM {table} WHERE "
-                    + " AND ".join(where)
-                    + " ORDER BY dt, server_id"
-                )
-        else:
-            table = "ads_dau_di"
-            pred = _date_predicate(time_hint, dialect=dialect).format(table=table)
-            where = [pred]
-            if sid:
-                where.append(sid)
-            sql = (
-                f"SELECT dt, server_id, dau, metric_id FROM {table} WHERE "
-                + " AND ".join(where)
-                + " ORDER BY dt, server_id"
-            )
+        table = "ads_dau_di"
+        pred = _date_predicate(time_hint, dialect=dialect).format(table=table)
+        where = [pred]
+        if sid:
+            where.append(sid)
+        sql = (
+            f"SELECT dt, server_id, dau, metric_id FROM {table} WHERE "
+            + " AND ".join(where)
+            + " ORDER BY dt, server_id"
+        )
     elif metric == "retention":
         table = "ads_retention_nd"
         pred = _date_predicate(time_hint, col="cohort_dt", dialect=dialect).format(table=table)
@@ -167,19 +180,16 @@ def _mock_sql(
             + " ORDER BY dt, server_id"
         )
     elif metric in ("pay_rate", "pay_users"):
-        if dialect in ("mysql", "doris"):
-            sql = _portable_ads_sql(metric, server_id) or ""
-        else:
-            table = "ads_pay_rate_di"
-            pred = _date_predicate(time_hint, dialect=dialect).format(table=table)
-            where = [pred]
-            if sid:
-                where.append(sid)
-            sql = (
-                f"SELECT dt, server_id, dau, pay_users, pay_rate, metric_id FROM {table} WHERE "
-                + " AND ".join(where)
-                + " ORDER BY dt, server_id"
-            )
+        table = "ads_pay_rate_di"
+        pred = _date_predicate(time_hint, dialect=dialect).format(table=table)
+        where = [pred]
+        if sid:
+            where.append(sid)
+        sql = (
+            f"SELECT dt, server_id, dau, pay_users, pay_rate, metric_id FROM {table} WHERE "
+            + " AND ".join(where)
+            + " ORDER BY dt, server_id"
+        )
     elif metric == "online_duration":
         table = "ads_online_duration_di"
         pred = _date_predicate(time_hint, dialect=dialect).format(table=table)
@@ -214,7 +224,8 @@ def _mock_sql(
         if dialect in ("mysql", "doris"):
             sql = (
                 "SELECT dt, server_id, dau, metric_id FROM ads_dau_di "
-                "WHERE metric_id = 'ads_dau_di' ORDER BY dt, server_id"
+                "WHERE dt = (SELECT max(dt) FROM ads_dau_di) AND metric_id = 'ads_dau_di' "
+                "ORDER BY dt, server_id"
             )
         else:
             sql = (
@@ -236,9 +247,11 @@ def _openai_sql(
     dialect = _dialect(settings)
     dialect_hint = (
         "Doris/MySQL (GameStream ADS). Prefer unqualified table names with database=ads. "
-        "Use DATE_SUB(CURRENT_DATE(), INTERVAL n DAY) or filter by metric_id; avoid DuckDB INTERVAL."
+        "Use DATE_SUB(CURRENT_DATE(), INTERVAL n DAY); last_7_days = inclusive [today-6, today]. "
+        "Business TZ Asia/Shanghai. Avoid DuckDB INTERVAL."
         if dialect in ("mysql", "doris")
-        else "DuckDB over GameStream ADS tables."
+        else "DuckDB over GameStream ADS tables. Business TZ Asia/Shanghai. "
+        "last_7_days = inclusive [today-6, today]."
     )
     schema_blob = "\n\n".join(f"### {d.title}\n{d.content}" for d in docs)
     prompt = (

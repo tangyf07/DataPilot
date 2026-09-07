@@ -103,6 +103,14 @@ class GateResult:
         )
 
 
+class GateError(Exception):
+    """Raised when a real gate backend fails and the pipeline must not execute SQL."""
+
+    def __init__(self, message: str, *, raw: Any = None) -> None:
+        super().__init__(message)
+        self.raw = raw
+
+
 @runtime_checkable
 class SQLGuardClient(Protocol):
     def check(self, sql: str) -> GateResult:
@@ -121,9 +129,10 @@ def build_guard_client(
     """Build a gate client.
 
     Modes:
-      - auto / write_gate: prefer real SQLGuard 1.1 adapter (module → HTTP → CLI → mock)
-      - http: force HTTP /v1/check when URL available (else fall through adapter)
-      - mock: always MockSQLGuardClient
+      - mock: always MockSQLGuardClient (only mode that uses mock)
+      - http: HTTP ``/v1/check`` | ``/v1/execute`` only — never mock
+      - write_gate: module (optional CLI) — never mock; missing module → BLOCK
+      - auto: module → http → cli; all fail → BLOCK (never mock)
     """
     mode = (mode or "auto").lower().strip()
     if mode == "mock":
@@ -141,4 +150,5 @@ def build_guard_client(
         db_path=db_path,
         database_url=database_url,
         prefer_http=prefer_http,
+        mode=mode,
     )

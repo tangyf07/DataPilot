@@ -1,7 +1,9 @@
 """Orchestrates the ChatBI agent loop with SQLGuard gate + one feedback retry.
 
 G7 path (Doris): generate SQL → SQLGuard block_or_execute(execute=True, database=Doris URL)
-→ map rows to QueryResult; fallback check + pymysql if execute cannot talk Doris.
+→ map rows to QueryResult. Post-ALLOW pymysql materialization only when the gate already
+returned EXECUTE+allowed but omitted rows (never after gate BLOCK / exception when
+guard_mode is not mock).
 """
 
 from __future__ import annotations
@@ -10,12 +12,11 @@ from dataclasses import dataclass, asdict, field
 from typing import Any
 
 from datapilot.config import Settings, get_settings
-from datapilot.guard.base import GateResult, build_guard_client
+from datapilot.guard.base import GateError, GateResult, build_guard_client
 from datapilot.intent import Intent, recognize_intent
 from datapilot.observe.tracer import Tracer
 from datapilot.query.engine import (
     DorisEngine,
-    
     QueryResult,
     build_engine,
     query_result_from_gate_rows,
@@ -28,6 +29,22 @@ from datapilot.sql.validator import ValidationResult, validate_result
 
 # 1 initial attempt + 1 feedback retry
 MAX_ATTEMPTS = 2
+
+
+def _gate_backend(gate: GateResult | None) -> str | None:
+    if gate is None:
+        return None
+    if isinstance(gate.raw, dict):
+        return gate.raw.get("backend")
+    return None
+
+
+def _fallback_reason(gate: GateResult | None) -> Any:
+    if gate is None or not isinstance(gate.raw, dict):
+        return None
+    # Explicit null when none; never invent mock_fallback in real modes
+    fb = gate.raw.get("fallback", None)
+    return fb
 
 
 @dataclass
@@ -47,6 +64,7 @@ class PipelineResult:
     attempts: int = 1
     query_backend: str = "duckdb"
     query_path: str | None = None
+    db_execute_count: int = 0
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -64,6 +82,8 @@ class PipelineResult:
                 "risk_score": self.gate.risk_score,
                 "executed": self.gate.executed,
                 "rowcount": self.gate.rowcount,
+                "backend": _gate_backend(self.gate),
+                "fallback_reason": _fallback_reason(self.gate),
             }
             if self.gate
             else None,
@@ -76,6 +96,7 @@ class PipelineResult:
             "attempts": self.attempts,
             "query_backend": self.query_backend,
             "query_path": self.query_path,
+            "db_execute_count": self.db_execute_count,
         }
 
 
@@ -84,7 +105,6 @@ class Pipeline:
         self.settings = settings or get_settings()
         self.backend = self.settings.effective_backend
         self.retriever = MockGameStreamRetriever()
-        # For Doris: pass database_url into WriteGate so execute hits MySQL/Doris
         database_url = self.settings.doris_url if self.backend == "doris" else None
         self.guard = build_guard_client(
             self.settings.guard_mode,
@@ -101,37 +121,79 @@ class Pipeline:
             auto_seed=True,
         )
         self.tracer = Tracer(self.settings.trace_dir)
+        self._db_execute_count = 0
+
+    def _record_gate(self, run: Any, gate: GateResult, *, attempt: int, query_path: str | None) -> dict[str, Any]:
+        info = {
+            "allowed": gate.allowed,
+            "action": gate.action,
+            "rule_id": gate.rule_id,
+            "reason": gate.reason,
+            "risk": gate.risk,
+            "datapilot": gate.datapilot,
+            "risk_score": gate.risk_score,
+            "latency_ms": gate.latency_ms,
+            "executed": gate.executed,
+            "rowcount": gate.rowcount,
+            "attempt": attempt,
+            "query_path": query_path,
+            "backend": _gate_backend(gate),
+            "fallback_reason": _fallback_reason(gate),
+            "db_execute_count": self._db_execute_count,
+        }
+        run.gate = info
+        run.meta["db_execute_count"] = self._db_execute_count
+        run.meta["gate_backend"] = info["backend"]
+        run.meta["fallback_reason"] = info["fallback_reason"]
+        return info
 
     def _execute_doris_via_guard(self, sql: str) -> tuple[GateResult, QueryResult | None, str]:
-        """True G7 path: SQLGuard execute against Doris; fallback check + pymysql.
+        """G7 path: SQLGuard execute against Doris.
 
-        Returns (gate, query_or_none, path_label).
+        On gate exception or BLOCK: do **not** fall through to pymysql when
+        ``guard_mode != mock`` (db_execute_count stays 0).
+
+        Post-ALLOW materialization: if gate returns EXECUTE+allowed but WriteGate
+        omitted rows, DorisEngine may fetch once (counts toward db_execute_count).
         """
-        # Prefer execute=True through WriteGate (database=DATAPILOT_DORIS_URL)
+        guard_mode = (self.settings.guard_mode or "auto").lower()
+
         if hasattr(self.guard, "execute"):
             try:
                 gate = self.guard.execute(sql)  # type: ignore[attr-defined]
+            except GateError as exc:
+                gate = GateResult.block(
+                    reason=str(exc),
+                    rule_id="gate_error",
+                    raw=exc.raw if isinstance(exc.raw, dict) else {"backend": "error", "error": str(exc), "fallback": None},
+                )
+                return gate, None, "sqlguard_execute_failed"
             except Exception as exc:  # noqa: BLE001
-                # Fall back to check-only then pymysql
-                gate = self.guard.check(sql)
-                if not gate.allowed:
-                    return gate, None, "sqlguard_execute_failed"
-                if isinstance(self.engine, DorisEngine):
-                    qres = self.engine.execute(sql)
-                    qres.path = "sqlguard_check_then_pymysql"
-                    if isinstance(gate.raw, dict):
-                        gate.raw = {
-                            **gate.raw,
-                            "execute_error": str(exc),
-                            "fallback": "sqlguard_check_then_pymysql",
-                        }
-                    return gate, qres, "sqlguard_check_then_pymysql"
-                raise
+                if guard_mode == "mock":
+                    # Mock clients typically only implement check(); rare execute path
+                    gate = self.guard.check(sql)
+                    if not gate.allowed:
+                        return gate, None, "sqlguard_execute_failed"
+                    if isinstance(self.engine, DorisEngine):
+                        self._db_execute_count += 1
+                        qres = self.engine.execute(sql)
+                        qres.path = "sqlguard_check_then_pymysql"
+                        return gate, qres, "sqlguard_check_then_pymysql"
+                    raise
+                # Real modes: never check-then-pymysql after execute failure
+                gate = GateResult.block(
+                    reason=f"gate execute error: {exc}",
+                    rule_id="gate_error",
+                    raw={"backend": _gate_backend(None) or "error", "error": str(exc), "fallback": None},
+                )
+                return gate, None, "sqlguard_execute_failed"
 
             if not gate.allowed:
                 return gate, None, "sqlguard_execute"
 
             if gate.executed and gate.rows is not None:
+                # Rows materialized by WriteGate (DB hit inside gate)
+                self._db_execute_count += 1
                 qres = query_result_from_gate_rows(
                     sql,
                     gate.rows,
@@ -140,16 +202,16 @@ class Pipeline:
                 )
                 return gate, qres, "sqlguard_execute"
 
-            # EXECUTE allowed but WriteGate could not materialize rows (e.g. no pymysql)
-            # → still gated: check already passed; run SELECT via DorisEngine
+            # EXECUTE+allowed but rows omitted → post-ALLOW fetch only
             if isinstance(self.engine, DorisEngine):
+                self._db_execute_count += 1
                 qres = self.engine.execute(sql)
                 qres.path = "sqlguard_check_then_pymysql"
                 if isinstance(gate.raw, dict):
                     gate.raw = {
                         **gate.raw,
                         "fallback": "sqlguard_check_then_pymysql",
-                        "note": "gate ALLOW but rows not materialized by WriteGate",
+                        "note": "gate ALLOW but rows not materialized by WriteGate; post-ALLOW fetch",
                     }
                 return gate, qres, "sqlguard_check_then_pymysql"
 
@@ -159,12 +221,14 @@ class Pipeline:
         gate = self.guard.check(sql)
         if not gate.allowed:
             return gate, None, "sqlguard_check"
+        self._db_execute_count += 1
         qres = self.engine.execute(sql)
         if isinstance(qres, QueryResult):
             qres.path = "sqlguard_check_then_engine"
         return gate, qres, "sqlguard_check_then_engine"
 
     def run(self, question: str) -> PipelineResult:
+        self._db_execute_count = 0
         run = self.tracer.begin(question)
         run.meta["query_backend"] = self.backend
         if self.settings.doris_url:
@@ -175,7 +239,7 @@ class Pipeline:
         intent = recognize_intent(question)
         step.finish(intent=asdict(intent))
 
-        # 2 RAG (SchemaRetriever / mock GameStream)
+        # 2 RAG
         step = run.start_step("rag")
         docs = self.retriever.retrieve(question, intent_name=intent.name, top_k=3)
         step.finish(docs=[{"id": d.doc_id, "score": d.score} for d in docs])
@@ -193,7 +257,6 @@ class Pipeline:
             attempts += 1
             suffix = "" if attempts == 1 else "_retry"
 
-            # 3 SQL generate (with optional gate/query feedback)
             step = run.start_step(f"sql_generate{suffix}")
             sql_gen = generate_sql(intent, docs, self.settings, feedback=feedback)
             run.model = sql_gen.model
@@ -209,12 +272,11 @@ class Pipeline:
             )
 
             if self.backend == "doris":
-                # 4+5 G7: SQLGuard execute (or check + pymysql) against Doris ADS
                 step = run.start_step(f"sqlguard{suffix}")
                 try:
                     gate, qres, query_path = self._execute_doris_via_guard(sql_gen.sql)
                 except Exception as exc:  # noqa: BLE001
-                    step.finish(error=str(exc))
+                    step.finish(error=str(exc), db_execute_count=self._db_execute_count)
                     retries.append(
                         {
                             "attempt": attempts,
@@ -224,6 +286,7 @@ class Pipeline:
                         }
                     )
                     run.meta["retries"] = retries
+                    run.meta["db_execute_count"] = self._db_execute_count
                     if attempts < MAX_ATTEMPTS:
                         feedback = f"Doris query failed: {exc}. Regenerate portable MySQL SELECT for ADS."
                         continue
@@ -248,23 +311,11 @@ class Pipeline:
                         attempts=attempts,
                         query_backend=self.backend,
                         query_path=query_path,
+                        db_execute_count=self._db_execute_count,
                     )
 
-                run.gate = {
-                    "allowed": gate.allowed,
-                    "action": gate.action,
-                    "rule_id": gate.rule_id,
-                    "reason": gate.reason,
-                    "risk": gate.risk,
-                    "datapilot": gate.datapilot,
-                    "risk_score": gate.risk_score,
-                    "latency_ms": gate.latency_ms,
-                    "executed": gate.executed,
-                    "rowcount": gate.rowcount,
-                    "attempt": attempts,
-                    "query_path": query_path,
-                }
-                step.finish(**run.gate)
+                gate_info = self._record_gate(run, gate, attempt=attempts, query_path=query_path)
+                step.finish(**gate_info)
                 run.meta["query_path"] = query_path
 
                 if not gate.allowed:
@@ -307,12 +358,12 @@ class Pipeline:
                         attempts=attempts,
                         query_backend=self.backend,
                         query_path=query_path,
+                        db_execute_count=self._db_execute_count,
                     )
 
-                # query step already done via guard
                 step = run.start_step(f"query{suffix}")
                 if qres is None:
-                    step.finish(error="no rows from guard/engine")
+                    step.finish(error="no rows from guard/engine", db_execute_count=self._db_execute_count)
                     retries.append(
                         {
                             "attempt": attempts,
@@ -346,30 +397,36 @@ class Pipeline:
                         attempts=attempts,
                         query_backend=self.backend,
                         query_path=query_path,
+                        db_execute_count=self._db_execute_count,
                     )
                 step.finish(
                     row_count=len(qres.rows),
                     columns=qres.columns,
                     backend=qres.backend,
                     path=qres.path,
+                    db_execute_count=self._db_execute_count,
                 )
 
             else:
                 # DuckDB path (offline): check then engine.execute
                 step = run.start_step(f"sqlguard{suffix}")
-                gate = self.guard.check(sql_gen.sql)
-                run.gate = {
-                    "allowed": gate.allowed,
-                    "action": gate.action,
-                    "rule_id": gate.rule_id,
-                    "reason": gate.reason,
-                    "risk": gate.risk,
-                    "datapilot": gate.datapilot,
-                    "risk_score": gate.risk_score,
-                    "latency_ms": gate.latency_ms,
-                    "attempt": attempts,
-                }
-                step.finish(**run.gate)
+                try:
+                    gate = self.guard.check(sql_gen.sql)
+                except GateError as exc:
+                    gate = GateResult.block(
+                        reason=str(exc),
+                        rule_id="gate_error",
+                        raw=exc.raw if isinstance(exc.raw, dict) else {"backend": "error", "error": str(exc), "fallback": None},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    gate = GateResult.block(
+                        reason=f"gate check error: {exc}",
+                        rule_id="gate_error",
+                        raw={"backend": "error", "error": str(exc), "fallback": None},
+                    )
+
+                gate_info = self._record_gate(run, gate, attempt=attempts, query_path="duckdb_direct")
+                step.finish(**gate_info)
                 query_path = "duckdb_direct"
 
                 if not gate.allowed:
@@ -412,15 +469,22 @@ class Pipeline:
                         attempts=attempts,
                         query_backend=self.backend,
                         query_path=query_path,
+                        db_execute_count=self._db_execute_count,
                     )
 
                 step = run.start_step(f"query{suffix}")
                 try:
+                    self._db_execute_count += 1
                     qres = self.engine.execute(sql_gen.sql)
                     query_path = qres.path if isinstance(qres, QueryResult) else "duckdb_direct"
-                    step.finish(row_count=len(qres.rows), columns=qres.columns)
+                    run.meta["db_execute_count"] = self._db_execute_count
+                    step.finish(
+                        row_count=len(qres.rows),
+                        columns=qres.columns,
+                        db_execute_count=self._db_execute_count,
+                    )
                 except Exception as exc:  # noqa: BLE001
-                    step.finish(error=str(exc))
+                    step.finish(error=str(exc), db_execute_count=self._db_execute_count)
                     retries.append(
                         {
                             "attempt": attempts,
@@ -454,9 +518,9 @@ class Pipeline:
                         attempts=attempts,
                         query_backend=self.backend,
                         query_path=query_path,
+                        db_execute_count=self._db_execute_count,
                     )
 
-            # 6 Validate
             assert qres is not None
             step = run.start_step(f"validate{suffix}")
             validation = validate_result(qres.columns, qres.rows)
@@ -482,7 +546,6 @@ class Pipeline:
 
         assert sql_gen is not None and gate is not None and qres is not None and validation is not None
 
-        # 7 Conclude
         step = run.start_step("conclude")
         report = build_report(
             intent,
@@ -495,6 +558,7 @@ class Pipeline:
         run.meta["retries"] = retries
         run.meta["attempts"] = attempts
         run.meta["query_path"] = query_path
+        run.meta["db_execute_count"] = self._db_execute_count
 
         path = self.tracer.save(run)
         return PipelineResult(
@@ -511,6 +575,7 @@ class Pipeline:
             attempts=attempts,
             query_backend=self.backend,
             query_path=query_path,
+            db_execute_count=self._db_execute_count,
         )
 
 
