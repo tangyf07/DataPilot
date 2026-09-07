@@ -380,9 +380,13 @@ def run_one_mode(mode: str, split: str, *, limit: int | None = None) -> dict[str
         summary = aggregate(results, mode=mode, split=split, skipped_real=False)
         if use_fixture:
             summary["real_path"] = "mock_fixture"
+            summary["llm_calls"] = "fixture"
+            summary["not_real_api"] = True
+            summary["model"] = "mock-fixture"
             summary["note"] = (
                 "OPENAI_API_KEY missing: used evals/fixtures/mock_llm_responses.json "
-                "(not a live model). Do not invent scores beyond fixture coverage."
+                "(not a live model). Do not invent scores beyond fixture coverage. "
+                "llm_calls=fixture / not_real_api=true — NOT true model performance."
             )
         elif mode == "real":
             summary["real_path"] = "openai"
@@ -409,6 +413,46 @@ def compare_summaries(summaries: list[dict[str, Any]]) -> dict[str, Any]:
     return {"compare": table, "runs": [{k: s[k] for k in s if k != "items"} for s in summaries]}
 
 
+
+def _summary_md(out: dict[str, Any]) -> str:
+    """Minimal markdown for a single-mode or compare JSON payload."""
+    from datetime import datetime, timezone
+
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    lines: list[str] = []
+    if "compare" in out:
+        lines.append("# DataPilot eval compare")
+        lines.append("")
+        lines.append(f"- timestamp: `{ts}`")
+        lines.append("")
+        for row in out.get("compare") or []:
+            metric = row.get("metric")
+            vals = {k: v for k, v in row.items() if k != "metric"}
+            lines.append(f"- **{metric}**: {vals}")
+        lines.append("")
+        return "\n".join(lines) + "\n"
+
+    mode = out.get("mode", "?")
+    real_path = out.get("real_path", mode)
+    lines.append(f"# DataPilot baseline — mode=`{mode}` path=`{real_path}`")
+    lines.append("")
+    lines.append(f"- timestamp: `{ts}`")
+    lines.append(f"- mode: `{mode}`")
+    lines.append(f"- real_path: `{real_path}`")
+    lines.append(f"- split: `{out.get('split')}`")
+    lines.append(f"- n_total: `{out.get('n_total')}`")
+    for m in ("answer_accuracy", "exec_success_rate", "repair_success_rate", "block_rate"):
+        lines.append(f"- **{m}**: `{out.get(m)}`")
+    if out.get("note"):
+        lines.append("")
+        lines.append(f"> Honesty: {out['note']}")
+    if real_path == "mock_fixture" or out.get("llm_calls") == "fixture":
+        lines.append("")
+        lines.append("> **Fixture run — not live model performance.** `llm_calls=fixture` / `not_real_api=true`")
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="DataPilot gold eval (four heuristic metrics)")
     p.add_argument("--mode", default="rules", help="rules|real  or compare: rules,real")
@@ -416,6 +460,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--limit", type=int, default=None, help="optional cap on gold rows (smoke)")
     p.add_argument("--compare", default=None, help="alias: comma modes e.g. rules,real")
     p.add_argument("--quiet-items", action="store_true", help="omit per-item details from JSON")
+    p.add_argument("--out", type=Path, default=None, help="write JSON summary to PATH")
+    p.add_argument("--report-md", type=Path, default=None, help="write markdown summary to PATH")
     args = p.parse_args(argv)
 
     modes_raw = args.compare or args.mode
@@ -436,7 +482,14 @@ def main(argv: list[str] | None = None) -> int:
         if not args.quiet_items:
             out["items_by_mode"] = {s["mode"]: s.get("items") for s in summaries}
 
-    print(json.dumps(out, ensure_ascii=False, indent=2))
+    payload = json.dumps(out, ensure_ascii=False, indent=2)
+    print(payload)
+    if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(payload + "\n", encoding="utf-8")
+    if args.report_md:
+        args.report_md.parent.mkdir(parents=True, exist_ok=True)
+        args.report_md.write_text(_summary_md(out), encoding="utf-8")
     return 0
 
 
