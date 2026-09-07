@@ -109,6 +109,10 @@ python -m datapilot g7
 
 默认 **`auto`**：已安装 `sql-write-gate` 时走真实 1.1 DataPilot `BLOCK`/`EXECUTE`（module → http → cli）。**仅** `DATAPILOT_GUARD_MODE=mock` 使用 Mock；真实模式超时/断连/ImportError 等 → **BLOCK**（`fallback: null`），不会 mock 回退。HTTP：`POST /v1/check` | `POST /v1/execute`（不用 `/v1/datapilot`）。见 `docs/sqlguard_contract.md`。
 
+## Evals
+
+Gold-question offline harness (four heuristic metrics): [`evals/`](./evals/) — see [`evals/README.md`](./evals/README.md). Retrieval remains **keyword docs**, not vector RAG.
+
 ## English
 
 DataPilot is the intelligent query layer in an AI data-eng suite: it consumes GameStream ADS metric contracts (`metric_id` / table names), gates SQL via SQLGuard (`sql-write-gate`), then explains results. Not bare Text2SQL / ChatBI homework.

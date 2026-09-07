@@ -1,3 +1,0 @@
-{"id": "dau_yesterday", "question": "昨天DAU多少？", "expect_metric": "dau", "expect_table": "ads_dau_di", "notes": "time_hint=yesterday"}
-{"id": "pay_rate_today", "question": "今天付费率？", "expect_metric": "pay_rate", "expect_table": "ads_pay_rate_di", "notes": "time_hint=today"}
-{"id": "retention_7d", "question": "近7天留存怎么样？", "expect_metric": "retention", "expect_table": "ads_retention_nd", "notes": "time_hint=last_7_days; exec success ≠ correct retention"}

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://datapilot.local/evals/gold.schema.json",
+  "title": "DataPilotGoldQuestion",
+  "type": "object",
+  "required": ["id", "split", "question", "metric_id", "time_hint", "expect_gate", "tags"],
+  "properties": {
+    "id": {"type": "string", "minLength": 1},
+    "split": {"type": "string", "enum": ["train", "test", "dev"]},
+    "question": {"type": "string", "minLength": 1},
+    "metric_id": {"type": "string"},
+    "time_hint": {"type": "string"},
+    "gold_sql": {"type": "string"},
+    "gold_sql_patterns": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "expect_gate": {"type": "string", "enum": ["EXECUTE", "BLOCK"]},
+    "gold_answer_check": {
+      "type": ["object", "null"],
+      "properties": {
+        "expect_rows_min": {"type": "integer", "minimum": 0},
+        "expect_columns": {
+          "type": "array",
+          "items": {"type": "string"}
+        }
+      },
+      "additionalProperties": true
+    },
+    "tags": {
+      "type": "array",
+      "items": {"type": "string"}
+    }
+  },
+  "additionalProperties": true
+}
