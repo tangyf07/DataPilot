@@ -10,7 +10,6 @@ venv/
 .env
 *.duckdb
 *.duckdb.wal
-traces/*.jsonl
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -19,3 +18,4 @@ traces/*.jsonl
 .DS_Store
 Thumbs.db
 .pytest_work/
+traces/*.json

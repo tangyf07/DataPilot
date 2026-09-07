@@ -44,6 +44,33 @@ pytest -q
 
 默认 `DATAPILOT_LLM_MODE=mock`，无需 API Key。
 
+
+## G7：ChatBI → SQLGuard → GameStream Doris ADS
+
+三件套真实链路（无 UI）：DataPilot 生成 ADS SQL → **SQLGuard 1.1** `block_or_execute(execute=True)` → Doris FE（MySQL 协议）查 `ads` 库。
+
+```bash
+# Windows 本机 Doris FE 已起时：
+pip install -e ".[dev,sqlguard,doris]"   # pymysql + sql-write-gate
+# 或: pip install pymysql && pip install -e /path/to/sql-write-gate
+
+$env:DATAPILOT_QUERY_BACKEND='doris'
+$env:DATAPILOT_DORIS_URL='mysql://root@127.0.0.1:9030/ads'
+$env:DATAPILOT_GUARD_MODE='write_gate'
+python -m datapilot g7
+# 等价: python demos/run_g7.py
+```
+
+| Env | 说明 |
+|-----|------|
+| `DATAPILOT_QUERY_BACKEND` | `duckdb` \| `doris` \| `auto`（有 URL 且可达则 doris） |
+| `DATAPILOT_DORIS_URL` | 默认 `mysql://root@127.0.0.1:9030/ads` |
+
+- 指标：`ads_dau_di` / `ads_pay_rate_di`（与 GameStream metric_id 对齐）
+- 门禁 catalog 使用**未限定表名** + `database=ads`（避免 `ads.ads_dau_di` 权限匹配失败）
+- Trace 中 `query_path`：`sqlguard_execute` 或回退 `sqlguard_check_then_pymysql`
+- 离线仍用 DuckDB seed：`DATAPILOT_QUERY_BACKEND=duckdb pytest -q`
+
 ## Env
 
 | Variable | Default | Notes |
@@ -55,6 +82,8 @@ pytest -q
 | `DATAPILOT_GUARD_CATALOG` | `./data/sqlguard/catalog.json` | ADS catalog |
 | `DATAPILOT_GUARD_POLICY` | `./data/sqlguard/policy.yaml` | SELECT policy |
 | `DATAPILOT_GAMESTREAM_METRICS` | `./data/gamestream/metrics.yaml` | optional metrics path |
+| `DATAPILOT_QUERY_BACKEND` | `auto` | `duckdb`\|`doris`\|`auto` |
+| `DATAPILOT_DORIS_URL` | — | Doris FE MySQL URL，如 `mysql://root@127.0.0.1:9030/ads` |
 | `DATAPILOT_TRACE_DIR` | `./traces` | JSON traces |
 
 ## SQLGuard

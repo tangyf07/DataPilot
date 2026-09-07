@@ -1,4 +1,13 @@
 {
+  "_note": "GameStream ADS catalog for DataPilot. Tables are unqualified names (ads_dau_di, ads_pay_rate_di, ...). For Doris FE use database=ads (DATAPILOT_DORIS_URL=mysql://root@127.0.0.1:9030/ads); schema-qualified ads.ads_dau_di may break SQLGuard permission matching — prefer unqualified.",
+  "_doris": {
+    "protocol": "mysql",
+    "default_url": "mysql://root@127.0.0.1:9030/ads",
+    "metric_id": [
+      "ads_dau_di",
+      "ads_pay_rate_di"
+    ]
+  },
   "as_of_date": "2026-09-06",
   "freshness_days": 30,
   "tables": {

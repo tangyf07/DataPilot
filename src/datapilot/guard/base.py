@@ -19,6 +19,11 @@ class GateResult:
     datapilot: str | None = None  # BLOCK | EXECUTE | APPROVAL
     risk_score: float | int | None = None
     latency_ms: float | None = None
+    # execute path extras
+    executed: bool = False
+    rows: list[Any] | None = None
+    rowcount: int | None = None
+    columns: list[str] | None = None
 
     @staticmethod
     def allow(
@@ -30,6 +35,10 @@ class GateResult:
         risk_score: float | int | None = None,
         latency_ms: float | None = None,
         risk: str | None = "low",
+        executed: bool = False,
+        rows: list[Any] | None = None,
+        rowcount: int | None = None,
+        columns: list[str] | None = None,
     ) -> "GateResult":
         return GateResult(
             allowed=True,
@@ -41,6 +50,10 @@ class GateResult:
             datapilot=datapilot,
             risk_score=risk_score,
             latency_ms=latency_ms,
+            executed=executed,
+            rows=rows,
+            rowcount=rowcount,
+            columns=columns,
         )
 
     @staticmethod
@@ -103,6 +116,7 @@ def build_guard_client(
     catalog_path: str | Path | None = None,
     policy_path: str | Path | None = None,
     db_path: str | Path | None = None,
+    database_url: str | None = None,
 ) -> SQLGuardClient:
     """Build a gate client.
 
@@ -125,5 +139,6 @@ def build_guard_client(
         catalog_path=catalog_path,
         policy_path=policy_path,
         db_path=db_path,
+        database_url=database_url,
         prefer_http=prefer_http,
     )

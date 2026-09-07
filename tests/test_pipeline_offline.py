@@ -34,6 +34,8 @@ def settings() -> Settings:
         guard_url=None,
         guard_catalog=None,
         guard_policy=None,
+        query_backend="duckdb",
+        doris_url=None,
     )
 
 
@@ -63,6 +65,7 @@ def test_dau_pipeline_offline(settings: Settings) -> None:
     )
     assert Path(result.trace_path).exists()
     assert result.attempts == 1
+    assert result.query_backend == "duckdb"
 
 
 def test_gate_block_then_retry(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -109,3 +112,18 @@ def test_mock_guard_blocks_multi() -> None:
     g = MockSQLGuardClient()
     r = g.check("SELECT 1; SELECT 2")
     assert r.action == "BLOCK"
+
+
+def test_portable_sql_for_doris_dialect(settings: Settings) -> None:
+    settings.query_backend = "doris"
+    settings.doris_url = "mysql://root@127.0.0.1:9030/ads"
+    from datapilot.intent import recognize_intent
+    from datapilot.rag.mock_gamestream import MockGameStreamRetriever
+
+    intent = recognize_intent("昨天DAU多少？")
+    docs = MockGameStreamRetriever().retrieve("昨天DAU", intent_name=intent.name)
+    gen = generate_sql(intent, docs, settings)
+    assert "INTERVAL" not in gen.sql.upper() or "DATE_SUB" in gen.sql.upper()
+    # G7 portable form preferred
+    assert "ads_dau_di" in gen.sql
+    assert "metric_id" in gen.sql.lower()

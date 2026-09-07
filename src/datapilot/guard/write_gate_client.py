@@ -23,6 +23,9 @@ class WriteGateSQLGuardClient:
       2. HTTP POST ``{guard_url}/v1/check`` when URL set
       3. CLI ``sql-write-gate datapilot --json``
       4. MockSQLGuardClient (marked in ``raw``)
+
+    When ``database_url`` / ``database`` is a mysql:// Doris URL, execute=True
+    runs SELECT through WriteGate MySQL adapter and returns rows in the payload.
     """
 
     def __init__(
@@ -32,6 +35,8 @@ class WriteGateSQLGuardClient:
         catalog_path: str | Path | None = None,
         policy_path: str | Path | None = None,
         db_path: str | Path | None = None,
+        database_url: str | None = None,
+        database: str | None = None,
         prefer_http: bool = False,
         actor: str | None = None,
         model_id: str | None = None,
@@ -43,6 +48,13 @@ class WriteGateSQLGuardClient:
         self.catalog_path = str(catalog_path) if catalog_path else None
         self.policy_path = str(policy_path) if policy_path else None
         self.db_path = str(db_path) if db_path else None
+        # Prefer explicit database / database_url (Doris mysql://); else duckdb db_path
+        self.database_url = (
+            database_url
+            or database
+            or os.getenv("DATAPILOT_DORIS_URL")
+            or None
+        )
         self.prefer_http = prefer_http
         self.actor = actor
         self.model_id = model_id
@@ -68,7 +80,7 @@ class WriteGateSQLGuardClient:
         return self._dispatch(sql, execute=False)
 
     def execute(self, sql: str) -> GateResult:
-        """Optional: call block_or_execute(execute=True). Pipeline still uses check + DuckDB."""
+        """Call block_or_execute(execute=True); rows/rowcount on ALLOW+executed."""
         return self._dispatch(sql, execute=True)
 
     def _dispatch(self, sql: str, *, execute: bool) -> GateResult:
@@ -113,7 +125,10 @@ class WriteGateSQLGuardClient:
             kw["catalog_path"] = self.catalog_path
         if self.policy_path:
             kw["policy_path"] = self.policy_path
-        if self.db_path:
+        # Prefer Doris/MySQL database URL when set; else DuckDB path
+        if self.database_url:
+            kw["database"] = self.database_url
+        elif self.db_path:
             kw["db_path"] = self.db_path
         if self.actor:
             kw["actor"] = self.actor
@@ -129,14 +144,22 @@ class WriteGateSQLGuardClient:
         return self._normalize(payload, backend="write_gate_datapilot")
 
     def _check_http(self, sql: str, *, execute: bool) -> GateResult:
-        path = "/v1/execute" if execute else "/v1/check"
+        path = "/v1/datapilot" if execute else "/v1/check"
+        # Prefer unified datapilot endpoint when available
+        if not execute and self.guard_url:
+            # keep legacy /v1/check for check-only
+            path = "/v1/check"
         url = f"{self.guard_url}{path}"
-        body: dict[str, Any] = {"sql": sql, "agent": self.agent}
+        body: dict[str, Any] = {"sql": sql, "agent": self.agent, "execute": execute}
         if self.catalog_path:
             body["catalog"] = self.catalog_path
+            body["catalog_path"] = self.catalog_path
         if self.policy_path:
             body["policy"] = self.policy_path
-        if self.db_path:
+            body["policy_path"] = self.policy_path
+        if self.database_url:
+            body["database"] = self.database_url
+        elif self.db_path:
             body["db_path"] = self.db_path
         if self.actor:
             body["actor"] = self.actor
@@ -170,7 +193,9 @@ class WriteGateSQLGuardClient:
             cmd.extend(["--catalog", self.catalog_path])
         if self.policy_path:
             cmd.extend(["--policy", self.policy_path])
-        if self.db_path:
+        if self.database_url:
+            cmd.extend(["--database", self.database_url])
+        elif self.db_path:
             cmd.extend(["--db", self.db_path])
         if self.actor:
             cmd.extend(["--actor", self.actor])
@@ -178,7 +203,7 @@ class WriteGateSQLGuardClient:
             cmd.extend(["--model-id", self.model_id])
         if self.prompt_summary:
             cmd.extend(["--prompt-summary", self.prompt_summary])
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         out = (proc.stdout or "").strip() or (proc.stderr or "").strip()
         try:
             payload = json.loads(out)
@@ -210,21 +235,34 @@ class WriteGateSQLGuardClient:
                 risk=getattr(data, "risk", None),
                 risk_score=getattr(data, "risk_score", None),
                 latency_ms=getattr(data, "latency_ms", None),
+                executed=bool(getattr(data, "executed", False)),
+                rows=getattr(data, "rows", None),
+                rowcount=getattr(data, "rowcount", None),
+                columns=getattr(data, "columns", None),
                 raw={"backend": backend, "payload": data},
             )
 
         if isinstance(data, dict):
             dp = data.get("datapilot")
             action = str(data.get("action") or "").upper()
+            # allowed may be absent; derive from datapilot/action
+            if "allowed" in data:
+                allowed = bool(data.get("allowed"))
+            else:
+                allowed = (str(dp).upper() == "EXECUTE") or action == "ALLOW"
             return self._from_fields(
                 datapilot=str(dp).upper() if dp else None,
                 action=action,
-                allowed=bool(data.get("allowed", False)),
+                allowed=allowed,
                 rule_id=data.get("rule_id"),
                 reason=str(data.get("reason", "")),
                 risk=data.get("risk"),
                 risk_score=data.get("risk_score"),
                 latency_ms=data.get("latency_ms"),
+                executed=bool(data.get("executed", False)),
+                rows=data.get("rows"),
+                rowcount=data.get("rowcount"),
+                columns=data.get("columns"),
                 raw={"backend": backend, "payload": data},
             )
 
@@ -242,9 +280,17 @@ class WriteGateSQLGuardClient:
         risk_score: Any,
         latency_ms: Any,
         raw: Any,
+        executed: bool = False,
+        rows: Any = None,
+        rowcount: Any = None,
+        columns: Any = None,
     ) -> GateResult:
         # Prefer datapilot verb when present
         verb = (datapilot or "").upper()
+        cols = list(columns) if isinstance(columns, (list, tuple)) else None
+        row_list = list(rows) if isinstance(rows, (list, tuple)) else None
+        rc = int(rowcount) if rowcount is not None else (len(row_list) if row_list is not None else None)
+
         if verb == "EXECUTE" or action == "ALLOW":
             return GateResult.allow(
                 reason=reason or "ok",
@@ -254,6 +300,10 @@ class WriteGateSQLGuardClient:
                 risk_score=risk_score,
                 latency_ms=float(latency_ms) if latency_ms is not None else None,
                 risk=str(risk) if risk is not None else "low",
+                executed=bool(executed),
+                rows=row_list,
+                rowcount=rc,
+                columns=cols,
             )
         if verb == "APPROVAL" or action in ("REQUIRE_APPROVAL", "APPROVAL"):
             return GateResult.require_approval(
