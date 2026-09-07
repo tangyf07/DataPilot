@@ -1,0 +1,89 @@
+{
+  "compare": [
+    {
+      "metric": "answer_accuracy",
+      "rules": 1.0,
+      "real": 0.9
+    },
+    {
+      "metric": "exec_success_rate",
+      "rules": 1.0,
+      "real": 1.0
+    },
+    {
+      "metric": "repair_success_rate",
+      "rules": null,
+      "real": null
+    },
+    {
+      "metric": "block_rate",
+      "rules": 1.0,
+      "real": 1.0
+    }
+  ],
+  "runs": [
+    {
+      "mode": "rules",
+      "split": "test",
+      "n_total": 12,
+      "n_execute": 10,
+      "n_block": 2,
+      "n_skipped": 0,
+      "skipped_real": false,
+      "answer_accuracy": 1.0,
+      "answer_accuracy_note": "heuristic: all gold_sql_patterns match AND gold_answer_check (if any); not LLM-judge",
+      "exec_success_rate": 1.0,
+      "repair_success_rate": null,
+      "repair_n": 0,
+      "block_rate": 1.0,
+      "counts": {
+        "answer_ok": 10,
+        "answer_scored": 10,
+        "exec_ok": 10,
+        "exec_scored": 10,
+        "repair_ok": 0,
+        "repair_scored": 0,
+        "block_ok": 2,
+        "block_scored": 2
+      },
+      "real_path": "rules"
+    },
+    {
+      "mode": "real",
+      "split": "test",
+      "n_total": 12,
+      "n_execute": 10,
+      "n_block": 2,
+      "n_skipped": 0,
+      "skipped_real": false,
+      "answer_accuracy": 0.9,
+      "answer_accuracy_note": "heuristic: all gold_sql_patterns match AND gold_answer_check (if any); not LLM-judge",
+      "exec_success_rate": 1.0,
+      "repair_success_rate": null,
+      "repair_n": 0,
+      "block_rate": 1.0,
+      "counts": {
+        "answer_ok": 9,
+        "answer_scored": 10,
+        "exec_ok": 10,
+        "exec_scored": 10,
+        "repair_ok": 0,
+        "repair_scored": 0,
+        "block_ok": 2,
+        "block_scored": 2
+      },
+      "real_path": "openai",
+      "not_real_api": false,
+      "llm_calls": "live",
+      "provider": "deepseek",
+      "model": "deepseek-chat",
+      "base_url": "https://api.deepseek.com/v1"
+    }
+  ],
+  "provider": "deepseek",
+  "model": "deepseek-chat",
+  "base_url": "https://api.deepseek.com/v1",
+  "commit_sha": "932bde171e0587fa805381dea8ab3e97d047141f",
+  "openai_api_key_set": true,
+  "timestamp_utc": "2026-09-07T10:50:00Z"
+}
