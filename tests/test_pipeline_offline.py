@@ -73,16 +73,18 @@ def test_gate_block_then_retry(settings: Settings, monkeypatch: pytest.MonkeyPat
     calls = {"n": 0}
     real_generate = generate_sql
 
-    def flaky_generate(intent, docs, settings, feedback=None):
+    def flaky_generate(intent, docs, settings, feedback=None, *, previous_sql=None):
         calls["n"] += 1
         if calls["n"] == 1 and feedback is None:
             return SQLGeneration(
                 sql="DROP TABLE ads_dau_di",
-                model="mock-rules-v1",
+                model="rules-v1",
                 prompt="[test] unsafe first attempt",
-                mode="mock",
+                mode="rules",
             )
-        return real_generate(intent, docs, settings, feedback=feedback)
+        return real_generate(
+            intent, docs, settings, feedback=feedback, previous_sql=previous_sql
+        )
 
     monkeypatch.setattr("datapilot.pipeline.generate_sql", flaky_generate)
 

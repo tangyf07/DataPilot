@@ -1,4 +1,12 @@
-"""SQL generator: mock/rules offline or OpenAI-compatible API.
+"""SQL generator: rules (offline) or real OpenAI-compatible API.
+
+Canonical LLM modes (``SQLGeneration.mode`` / traces / CLI):
+  - ``real``     — live model call succeeded
+  - ``rules``    — deterministic keyword/rules SQL (aliases: mock)
+  - ``degraded`` — intended real, but fell back to rules after failure
+
+``DATAPILOT_LLM_MODE`` aliases: ``openai``→``real``, ``mock``→``rules``.
+Default when unset: API key present → ``real``, else ``rules``.
 
 Business calendar timezone: **Asia/Shanghai** (UTC+8). Date predicates
 (``today`` / ``yesterday`` / ``last_7_days``) use the operator's ``CURRENT_DATE`` /
@@ -18,16 +26,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from datapilot.config import normalize_llm_mode
 from datapilot.intent import Intent
 from datapilot.rag.base import RetrievedDoc
-
 
 @dataclass
 class SQLGeneration:
     sql: str
     model: str
     prompt: str
-    mode: str
+    mode: str  # real | rules | degraded
+    degraded_from: str | None = None
+    real_model_error: str | None = None
 
 
 def _dialect(settings: Any) -> str:
@@ -115,24 +125,33 @@ def _portable_ads_sql(
     return None
 
 
-def _mock_sql(
+def _rules_sql(
     intent: Intent,
     docs: list[RetrievedDoc],
     feedback: str | None = None,
     *,
     dialect: str = "duckdb",
+    previous_sql: str | None = None,
+    mode: str = "rules",
+    degraded_from: str | None = None,
+    real_model_error: str | None = None,
 ) -> SQLGeneration:
+    """Deterministic keyword/rules SQL (canonical mode ``rules`` or ``degraded``)."""
     metric = intent.metric or "dau"
     time_hint = intent.time_hint or "latest"
     server_id = getattr(intent, "server_id", None)
 
     prompt = (
-        f"[mock] intent={intent.name} metric={metric} time={time_hint} "
+        f"[rules] intent={intent.name} metric={metric} time={time_hint} "
         f"server_id={server_id} dialect={dialect} tz=Asia/Shanghai "
         f"docs={[d.doc_id for d in docs]}"
     )
+    if previous_sql:
+        prompt += f"\n[previous_sql] {previous_sql}"
     if feedback:
         prompt += f"\n[retry_feedback] {feedback}"
+    if real_model_error:
+        prompt += f"\n[real_model_error] {real_model_error}"
 
     # G7 / Doris: portable ADS SQL with time predicates for DAU + pay_rate
     if dialect in ("mysql", "doris"):
@@ -140,8 +159,14 @@ def _mock_sql(
             metric, server_id, time_hint=time_hint, dialect="mysql"
         )
         if portable:
-            mode = "mock_retry" if feedback else "mock_doris"
-            return SQLGeneration(sql=portable, model="mock-rules-v1", prompt=prompt, mode=mode)
+            return SQLGeneration(
+                sql=portable,
+                model="rules-v1",
+                prompt=prompt,
+                mode=mode,
+                degraded_from=degraded_from,
+                real_model_error=real_model_error,
+            )
 
     sid = _server_clause(server_id)
 
@@ -234,17 +259,38 @@ def _mock_sql(
             )
 
     sql = sql.strip().rstrip(";").split(";")[0].strip()
-    mode = "mock_retry" if feedback else ("mock_doris" if dialect in ("mysql", "doris") else "mock")
-    return SQLGeneration(sql=sql, model="mock-rules-v1", prompt=prompt, mode=mode)
+    return SQLGeneration(
+        sql=sql,
+        model="rules-v1",
+        prompt=prompt,
+        mode=mode,
+        degraded_from=degraded_from,
+        real_model_error=real_model_error,
+    )
 
 
-def _openai_sql(
+# Back-compat alias used by older call sites / tests
+def _mock_sql(
     intent: Intent,
     docs: list[RetrievedDoc],
-    settings: Any,
     feedback: str | None = None,
+    *,
+    dialect: str = "duckdb",
+    previous_sql: str | None = None,
 ) -> SQLGeneration:
-    dialect = _dialect(settings)
+    return _rules_sql(
+        intent, docs, feedback=feedback, dialect=dialect, previous_sql=previous_sql, mode="rules"
+    )
+
+
+def _build_real_prompt(
+    intent: Intent,
+    docs: list[RetrievedDoc],
+    *,
+    dialect: str,
+    feedback: str | None = None,
+    previous_sql: str | None = None,
+) -> str:
     dialect_hint = (
         "Doris/MySQL (GameStream ADS). Prefer unqualified table names with database=ads. "
         "Use DATE_SUB(CURRENT_DATE(), INTERVAL n DAY); last_7_days = inclusive [today-6, today]. "
@@ -263,15 +309,45 @@ def _openai_sql(
         f"Intent: {intent}\n"
         f"Question: {intent.raw}\n"
     )
+    if previous_sql:
+        prompt += f"\nPrevious SQL:\n{previous_sql}\n"
     if feedback:
         prompt += (
             f"\nPrevious attempt failed. Feedback:\n{feedback}\n"
             "Regenerate a single safer SELECT only.\n"
         )
+    return prompt
+
+
+def _real_sql(
+    intent: Intent,
+    docs: list[RetrievedDoc],
+    settings: Any,
+    feedback: str | None = None,
+    *,
+    previous_sql: str | None = None,
+) -> SQLGeneration:
+    """Call OpenAI-compatible API. On any failure → explicit ``degraded`` rules SQL."""
+    dialect = _dialect(settings)
+    prompt = _build_real_prompt(
+        intent, docs, dialect=dialect, feedback=feedback, previous_sql=previous_sql
+    )
+    api_key = getattr(settings, "openai_api_key", None)
+    if not api_key:
+        return _rules_sql(
+            intent,
+            docs,
+            feedback=feedback,
+            dialect=dialect,
+            previous_sql=previous_sql,
+            mode="degraded",
+            degraded_from="real",
+            real_model_error="OPENAI_API_KEY missing",
+        )
     try:
         from openai import OpenAI  # type: ignore
 
-        client = OpenAI(api_key=settings.openai_api_key, base_url=settings.openai_base_url)
+        client = OpenAI(api_key=api_key, base_url=settings.openai_base_url)
         system = (
             "Output a single MySQL/Doris SELECT only."
             if dialect in ("mysql", "doris")
@@ -289,18 +365,28 @@ def _openai_sql(
         if text.startswith("```"):
             lines = text.splitlines()
             text = "\n".join(l for l in lines if not l.startswith("```"))
+        sql = text.strip().rstrip(";").split(";")[0].strip()
+        if not sql:
+            raise ValueError("empty SQL from real model")
         return SQLGeneration(
-            sql=text.strip().rstrip(";").split(";")[0].strip(),
+            sql=sql,
             model=settings.openai_model,
             prompt=prompt,
-            mode="openai_retry" if feedback else "openai",
+            mode="real",
         )
     except Exception as exc:  # noqa: BLE001
-        fallback = _mock_sql(
-            intent, docs, feedback=feedback or f"openai_error: {exc}", dialect=dialect
+        err = str(exc)
+        fallback = _rules_sql(
+            intent,
+            docs,
+            feedback=feedback or f"real_model_error: {err}",
+            dialect=dialect,
+            previous_sql=previous_sql,
+            mode="degraded",
+            degraded_from="real",
+            real_model_error=err,
         )
-        fallback.prompt = prompt + f"\n[openai_error->mock] {exc}"
-        fallback.mode = "mock_fallback"
+        fallback.prompt = prompt + f"\n[real_error->degraded] {err}"
         return fallback
 
 
@@ -309,11 +395,42 @@ def generate_sql(
     docs: list[RetrievedDoc],
     settings: Any,
     feedback: str | None = None,
+    *,
+    previous_sql: str | None = None,
 ) -> SQLGeneration:
-    """Generate SQL. On feedback (gate/query failure), regenerate safer SELECT (max 1 retry upstream)."""
+    """Generate SQL.
+
+    In ``real`` mode, feedback retries call the real model again with the original
+    question + previous SQL + error feedback + schema. Only after that real call
+    fails do we fall back to rules with ``mode=degraded``.
+    """
     dialect = _dialect(settings)
-    if getattr(settings, "llm_mode", "mock") == "openai" and getattr(settings, "openai_api_key", None):
-        if feedback:
-            return _mock_sql(intent, docs, feedback=feedback, dialect=dialect)
-        return _openai_sql(intent, docs, settings, feedback=None)
-    return _mock_sql(intent, docs, feedback=feedback, dialect=dialect)
+    has_key = bool(getattr(settings, "openai_api_key", None))
+    mode = normalize_llm_mode(getattr(settings, "llm_mode", None), has_api_key=has_key)
+
+    if mode == "real":
+        # Always attempt real model — including feedback retries (previous bug used rules here).
+        return _real_sql(
+            intent, docs, settings, feedback=feedback, previous_sql=previous_sql
+        )
+    if mode == "degraded":
+        # Forced degraded: rules path, labeled degraded (not a silent "real" success).
+        return _rules_sql(
+            intent,
+            docs,
+            feedback=feedback,
+            dialect=dialect,
+            previous_sql=previous_sql,
+            mode="degraded",
+            degraded_from="forced",
+            real_model_error="DATAPILOT_LLM_MODE=degraded",
+        )
+    # rules (and mock alias)
+    return _rules_sql(
+        intent,
+        docs,
+        feedback=feedback,
+        dialect=dialect,
+        previous_sql=previous_sql,
+        mode="rules",
+    )

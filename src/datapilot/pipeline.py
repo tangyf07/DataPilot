@@ -73,6 +73,9 @@ class PipelineResult:
             "docs": [{"id": d.doc_id, "title": d.title, "score": d.score} for d in self.docs],
             "sql": self.sql_gen.sql if self.sql_gen else None,
             "model": self.sql_gen.model if self.sql_gen else None,
+            "llm_mode": self.sql_gen.mode if self.sql_gen else None,
+            "degraded_from": getattr(self.sql_gen, "degraded_from", None) if self.sql_gen else None,
+            "real_model_error": getattr(self.sql_gen, "real_model_error", None) if self.sql_gen else None,
             "gate": {
                 "allowed": self.gate.allowed,
                 "action": self.gate.action,
@@ -244,7 +247,10 @@ class Pipeline:
         docs = self.retriever.retrieve(question, intent_name=intent.name, top_k=3)
         step.finish(docs=[{"id": d.doc_id, "score": d.score} for d in docs])
 
+        from datapilot.config import normalize_llm_mode
+
         feedback: str | None = None
+        previous_sql: str | None = None
         retries: list[dict[str, Any]] = []
         sql_gen: SQLGeneration | None = None
         gate: GateResult | None = None
@@ -252,24 +258,46 @@ class Pipeline:
         validation: ValidationResult | None = None
         query_path: str | None = None
         attempts = 0
+        run.meta["llm_mode"] = normalize_llm_mode(
+            self.settings.llm_mode, has_api_key=bool(self.settings.openai_api_key)
+        )
+        run.meta.setdefault("real_model_failures", 0)
 
         while attempts < MAX_ATTEMPTS:
             attempts += 1
             suffix = "" if attempts == 1 else "_retry"
 
             step = run.start_step(f"sql_generate{suffix}")
-            sql_gen = generate_sql(intent, docs, self.settings, feedback=feedback)
+            sql_gen = generate_sql(
+                intent,
+                docs,
+                self.settings,
+                feedback=feedback,
+                previous_sql=previous_sql,
+            )
             run.model = sql_gen.model
             run.prompt = sql_gen.prompt
             run.sql = sql_gen.sql
+            run.meta["llm_mode"] = sql_gen.mode
+            if sql_gen.mode == "degraded":
+                run.meta["degraded_from"] = sql_gen.degraded_from
+                if sql_gen.real_model_error:
+                    run.meta["real_model_error"] = sql_gen.real_model_error
+                # Count only actual real-model failures (not forced degraded env).
+                if sql_gen.degraded_from == "real" and sql_gen.real_model_error:
+                    run.meta["real_model_failures"] = int(run.meta.get("real_model_failures", 0)) + 1
             step.finish(
                 sql=sql_gen.sql,
                 model=sql_gen.model,
                 mode=sql_gen.mode,
+                degraded_from=sql_gen.degraded_from,
+                real_model_error=sql_gen.real_model_error,
                 attempt=attempts,
                 feedback=feedback,
+                previous_sql=previous_sql,
                 dialect=self.settings.sql_dialect,
             )
+            previous_sql = sql_gen.sql
 
             if self.backend == "doris":
                 step = run.start_step(f"sqlguard{suffix}")
@@ -288,7 +316,11 @@ class Pipeline:
                     run.meta["retries"] = retries
                     run.meta["db_execute_count"] = self._db_execute_count
                     if attempts < MAX_ATTEMPTS:
-                        feedback = f"Doris query failed: {exc}. Regenerate portable MySQL SELECT for ADS."
+                        feedback = (
+                            f"Doris query failed: {exc}. "
+                            f"Previous SQL:\n{sql_gen.sql}\n"
+                            "Regenerate portable MySQL SELECT for ADS."
+                        )
                         continue
                     run.meta["attempts"] = attempts
                     path = self.tracer.save(run)
@@ -332,6 +364,7 @@ class Pipeline:
                     if attempts < MAX_ATTEMPTS:
                         feedback = (
                             f"SQLGuard {gate.action} ({gate.rule_id}): {gate.reason}. "
+                            f"Previous SQL:\n{sql_gen.sql}\n"
                             "Regenerate a single safe SELECT only (no DDL/DML/multi-statement)."
                         )
                         continue
@@ -374,7 +407,11 @@ class Pipeline:
                     )
                     run.meta["retries"] = retries
                     if attempts < MAX_ATTEMPTS:
-                        feedback = "Query returned no result. Use portable SELECT on ads_dau_di / ads_pay_rate_di."
+                        feedback = (
+                            "Query returned no result. "
+                            f"Previous SQL:\n{sql_gen.sql}\n"
+                            "Use portable SELECT on ads_dau_di / ads_pay_rate_di."
+                        )
                         continue
                     run.meta["attempts"] = attempts
                     path = self.tracer.save(run)
@@ -443,6 +480,7 @@ class Pipeline:
                     if attempts < MAX_ATTEMPTS:
                         feedback = (
                             f"SQLGuard {gate.action} ({gate.rule_id}): {gate.reason}. "
+                            f"Previous SQL:\n{sql_gen.sql}\n"
                             "Regenerate a single safe SELECT only (no DDL/DML/multi-statement)."
                         )
                         continue
@@ -495,7 +533,11 @@ class Pipeline:
                     )
                     run.meta["retries"] = retries
                     if attempts < MAX_ATTEMPTS:
-                        feedback = f"Query failed: {exc}. Fix DuckDB SELECT for ADS tables."
+                        feedback = (
+                            f"Query failed: {exc}. "
+                            f"Previous SQL:\n{sql_gen.sql}\n"
+                            "Fix DuckDB SELECT for ADS tables."
+                        )
                         continue
                     run.meta["attempts"] = attempts
                     path = self.tracer.save(run)
@@ -538,6 +580,7 @@ class Pipeline:
                 run.meta["retries"] = retries
                 feedback = (
                     f"Validation issues: {validation.issues}. "
+                    f"Previous SQL:\n{sql_gen.sql}\n"
                     "Regenerate a simpler SELECT that returns rows."
                 )
                 continue

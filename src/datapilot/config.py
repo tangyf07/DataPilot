@@ -12,6 +12,25 @@ load_dotenv()
 
 DEFAULT_DORIS_URL = "mysql://root@127.0.0.1:9030/ads"
 
+# Canonical LLM modes: real | rules | degraded (aliases openai→real, mock→rules)
+_LLM_MODE_ALIASES = {"openai": "real", "mock": "rules"}
+CANONICAL_LLM_MODES = frozenset({"real", "rules", "degraded"})
+
+
+def normalize_llm_mode(raw: str | None, *, has_api_key: bool = False) -> str:
+    """Map env/setting aliases to canonical ``real``|``rules``|``degraded``.
+
+    Default when unset: API key present → ``real``, else ``rules``.
+    """
+    if raw is None or str(raw).strip() == "":
+        return "real" if has_api_key else "rules"
+    mode = str(raw).strip().lower()
+    mode = _LLM_MODE_ALIASES.get(mode, mode)
+    if mode not in CANONICAL_LLM_MODES:
+        return "real" if has_api_key else "rules"
+    return mode
+
+
 
 def _default_root() -> Path:
     # package -> src/datapilot -> src -> repo root
@@ -86,9 +105,7 @@ class Settings:
     def load(cls) -> "Settings":
         root = _default_root()
         key = os.getenv("OPENAI_API_KEY") or None
-        mode = os.getenv("DATAPILOT_LLM_MODE")
-        if not mode:
-            mode = "openai" if key else "mock"
+        mode = normalize_llm_mode(os.getenv("DATAPILOT_LLM_MODE"), has_api_key=bool(key))
         db = os.getenv("DATAPILOT_DB_PATH", str(root / "data" / "datapilot.duckdb"))
         trace = os.getenv("DATAPILOT_TRACE_DIR", str(root / "traces"))
         catalog = os.getenv(

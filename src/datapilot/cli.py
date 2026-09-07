@@ -73,7 +73,7 @@ def _settings_for_g7() -> Settings:
     if not os.environ.get("DATAPILOT_DORIS_URL"):
         os.environ["DATAPILOT_DORIS_URL"] = DEFAULT_DORIS_URL
     os.environ.setdefault("DATAPILOT_GUARD_MODE", "write_gate")
-    os.environ.setdefault("DATAPILOT_LLM_MODE", "mock")
+    os.environ.setdefault("DATAPILOT_LLM_MODE", "rules")
     return get_settings()
 
 

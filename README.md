@@ -18,14 +18,16 @@ flowchart LR
 ## 闭环
 
 1. Intent（指标 / 时间 / 可选 server_id）
-2. Schema/metrics RAG（`MockGameStreamRetriever`；真实 GameStream 预留）
-3. Text2SQL（mock 规则或 OpenAI 兼容）
-4. **SQLGuard** 门禁 — BLOCK 时 **一次反馈重试**
-5. DuckDB 执行 — 失败再反馈重试一次
+2. Retrieval（`MockGameStreamRetriever`：**硬编码关键词文档打分**，不是向量 RAG / embedding 检索）
+3. Text2SQL（`real` 模型 / `rules` 规则；真实失败则显式 `degraded`）
+4. **SQLGuard** 门禁 — BLOCK 时 **一次反馈重试**（`real` 模式重试仍调真实模型，并带上 previous SQL）
+5. DuckDB / Doris 执行 — 失败再反馈重试一次
 6. 校验 → 自然语言结论 + 表
 7. Trace（`traces/`）
 
 最多 **2** 次尝试（1 次重试）。
+
+> **诚实边界：** SQL 执行成功（有行返回）**不等于**答案正确。口径、时间窗、server 过滤仍需人工核对。Retrieval 当前是关键词规则，不是向量库 RAG。
 
 ## 指标对齐
 
@@ -42,7 +44,7 @@ python -m datapilot "昨天DAU多少？"
 pytest -q
 ```
 
-默认 `DATAPILOT_LLM_MODE=mock`，无需 API Key。
+默认无 Key 时 `DATAPILOT_LLM_MODE=rules`（别名 `mock` 仍可用），无需 API Key。
 
 
 ## G7：ChatBI → SQLGuard → GameStream Doris ADS
@@ -76,11 +78,23 @@ python -m datapilot g7
 - 离线单元测试（DuckDB seed）：`DATAPILOT_QUERY_BACKEND=duckdb pytest -q` — 与 live Doris G7 demo 分开验证
 - Suite acceptance (offline, no Doris claim): `pytest -m suite_p0 -q` (or by path)
 
+## LLM modes（诚实标注）
+
+| Mode | Env / alias | Behavior |
+|------|-------------|----------|
+| `real` | `real` / `openai` | 调用 OpenAI 兼容 API；`SQLGeneration.mode=real` |
+| `rules` | `rules` / `mock` | 确定性关键词/规则 SQL；离线默认可跑 |
+| `degraded` | `degraded`，或 **real 调用失败后自动** | 回退到 rules，但 **显式** `mode=degraded`，并写 `degraded_from` / `real_model_error`；`meta.real_model_failures` 递增。**绝不当成 silent real 成功** |
+
+未设置 `DATAPILOT_LLM_MODE` 时：有 `OPENAI_API_KEY` → `real`，否则 → `rules`。
+
+反馈重试：在 `real` 模式下会再次调用真实模型（原问题 + previous SQL + error feedback + schema）；仅当这次真实调用失败才 rules/`degraded`。
+
 ## Env
 
 | Variable | Default | Notes |
 |----------|---------|--------|
-| `DATAPILOT_LLM_MODE` | `mock` | or `openai` |
+| `DATAPILOT_LLM_MODE` | `rules`（无 Key）/ `real`（有 Key） | `real`\|`rules`\|`degraded`（别名 `openai`/`mock`） |
 | `OPENAI_API_KEY` / `BASE_URL` / `MODEL` | — | OpenAI-compatible |
 | `DATAPILOT_DB_PATH` | `./data/datapilot.duckdb` | DuckDB |
 | `DATAPILOT_GUARD_MODE` | `auto` | `auto`\|`write_gate`\|`http`\|`mock` |
