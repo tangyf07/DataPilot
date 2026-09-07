@@ -389,7 +389,40 @@ def run_one_mode(mode: str, split: str, *, limit: int | None = None) -> dict[str
                 "llm_calls=fixture / not_real_api=true — NOT true model performance."
             )
         elif mode == "real":
+            base_url = (os.getenv("OPENAI_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
+            model = os.getenv("OPENAI_MODEL") or "gpt-4o-mini"
+            provider = "deepseek" if "deepseek" in base_url.lower() else "openai_compatible"
+            degraded_items = [
+                i.id
+                for i in results
+                if (i.details or {}).get("llm_mode") == "degraded"
+            ]
+            retried_items = [i.id for i in results if i.retried]
+            failed_ids = [
+                i.id
+                for i in results
+                if not i.skipped and i.expect_gate == "EXECUTE" and i.answer_ok is False
+            ]
             summary["real_path"] = "openai"
+            summary["llm_calls"] = "live"
+            summary["not_real_api"] = False
+            summary["model"] = model
+            summary["provider"] = provider
+            summary["base_url"] = base_url
+            summary["openai_api_key_set"] = True
+            summary["failed_item_ids"] = failed_ids
+            summary["degraded_items"] = degraded_items
+            summary["degraded_count"] = len(degraded_items)
+            summary["retry_stats"] = {
+                "n_retried": len(retried_items),
+                "retried_items": retried_items,
+                "repair_success_rate": summary.get("repair_success_rate"),
+                "repair_n": summary.get("repair_n"),
+            }
+            summary["note"] = (
+                f"live {provider} OpenAI-compatible API "
+                f"(not_real_api=false, llm_calls=live, model={model}). Not fixture/mock."
+            )
         else:
             summary["real_path"] = "rules"
         return summary
@@ -446,9 +479,26 @@ def _summary_md(out: dict[str, Any]) -> str:
     if out.get("note"):
         lines.append("")
         lines.append(f"> Honesty: {out['note']}")
+    if out.get("model"):
+        lines.append(f"- model: `{out.get('model')}`")
+    if out.get("provider"):
+        lines.append(f"- provider: `{out.get('provider')}`")
+    if out.get("base_url"):
+        lines.append(f"- base_url: `{out.get('base_url')}`")
+    if "not_real_api" in out:
+        lines.append(f"- not_real_api: `{out.get('not_real_api')}`")
+    if out.get("llm_calls"):
+        lines.append(f"- llm_calls: `{out.get('llm_calls')}`")
+    if out.get("degraded_count") is not None:
+        lines.append(f"- degraded_count: `{out.get('degraded_count')}`")
+    if out.get("failed_item_ids"):
+        lines.append(f"- failed_item_ids: `{out.get('failed_item_ids')}`")
     if real_path == "mock_fixture" or out.get("llm_calls") == "fixture":
         lines.append("")
         lines.append("> **Fixture run — not live model performance.** `llm_calls=fixture` / `not_real_api=true`")
+    elif out.get("llm_calls") == "live" and out.get("not_real_api") is False:
+        lines.append("")
+        lines.append("> **Live API run.** `llm_calls=live` / `not_real_api=false`")
     lines.append("")
     return "\n".join(lines) + "\n"
 
