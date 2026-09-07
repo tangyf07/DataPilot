@@ -74,6 +74,7 @@ python -m datapilot g7
 - 门禁 catalog 使用**未限定表名** + `database=ads`（避免 `ads.ads_dau_di` 权限匹配失败）
 - Trace 中 `query_path`：`sqlguard_execute`，或 gate 已 ALLOW 但未物化行时的 post-ALLOW `sqlguard_check_then_pymysql`（gate BLOCK/异常时**不会** pymysql 旁路）
 - 离线单元测试（DuckDB seed）：`DATAPILOT_QUERY_BACKEND=duckdb pytest -q` — 与 live Doris G7 demo 分开验证
+- Suite acceptance (offline, no Doris claim): `pytest -m suite_p0 -q` (or by path)
 
 ## Env
 

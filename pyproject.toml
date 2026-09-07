@@ -29,3 +29,9 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+  "suite_p0: suite acceptance — no mock fallback + time intent predicates",
+  "suite_gate: gate no-mock-fallback / HTTP contract",
+  "suite_time: time intent date predicates (Asia/Shanghai)",
+]
+

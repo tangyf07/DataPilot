@@ -14,6 +14,7 @@ from datapilot.pipeline import Pipeline
 from datapilot.rag.mock_gamestream import MockGameStreamRetriever
 from datapilot.sql.generator import _date_predicate, generate_sql
 
+pytestmark = [pytest.mark.suite_p0, pytest.mark.suite_time]
 
 @pytest.fixture()
 def settings() -> Settings:

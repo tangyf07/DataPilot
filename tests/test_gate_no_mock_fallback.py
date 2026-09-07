@@ -12,6 +12,7 @@ from datapilot.guard.base import GateResult, build_guard_client
 from datapilot.guard.write_gate_client import WriteGateSQLGuardClient
 from datapilot.pipeline import Pipeline
 
+pytestmark = [pytest.mark.suite_p0, pytest.mark.suite_gate]
 
 @pytest.fixture()
 def settings(tmp_path: Path) -> Settings:

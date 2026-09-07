@@ -10,6 +10,7 @@ import pytest
 
 from datapilot.guard.write_gate_client import WriteGateSQLGuardClient
 
+pytestmark = [pytest.mark.suite_p0, pytest.mark.suite_gate]
 
 class _Handler(BaseHTTPRequestHandler):
     paths: list[str] = []
