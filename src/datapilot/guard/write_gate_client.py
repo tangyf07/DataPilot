@@ -239,12 +239,27 @@ class WriteGateSQLGuardClient:
         if self.prompt_summary:
             cmd.extend(["--prompt-summary", self.prompt_summary])
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-        out = (proc.stdout or "").strip() or (proc.stderr or "").strip()
+        stdout = (proc.stdout or "").strip()
+        stderr = (proc.stderr or "").strip()
+        # Protocol error: success exit with totally empty streams must never become EXECUTE
+        if proc.returncode == 0 and not stdout and not stderr:
+            return GateResult.block(
+                reason="protocol error: empty CLI output",
+                rule_id="protocol_error",
+                raw={
+                    "backend": "cli",
+                    "error": "empty_cli_output",
+                    "fallback": None,
+                    "returncode": proc.returncode,
+                },
+                datapilot="BLOCK",
+            )
+        out = stdout or stderr
         try:
             payload = json.loads(out)
         except json.JSONDecodeError:
             lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
-            verb = lines[0].upper() if lines else ("EXECUTE" if proc.returncode == 0 else "BLOCK")
+            verb = lines[0].upper() if lines else "BLOCK"
             payload = {
                 "datapilot": verb if verb in ("BLOCK", "EXECUTE", "APPROVAL") else "BLOCK",
                 "action": "ALLOW" if verb == "EXECUTE" else ("REQUIRE_APPROVAL" if verb == "APPROVAL" else "BLOCK"),
@@ -260,10 +275,16 @@ class WriteGateSQLGuardClient:
         if hasattr(data, "allowed") and hasattr(data, "action") and not isinstance(data, dict):
             action = str(getattr(data, "action", "BLOCK")).upper()
             dp = getattr(data, "datapilot", None)
+            # Preserve tri-state allowed (None = absent) for consistency checks
+            if hasattr(data, "allowed"):
+                allowed_raw = getattr(data, "allowed")
+                allowed: bool | None = None if allowed_raw is None else bool(allowed_raw)
+            else:
+                allowed = None
             return self._from_fields(
                 datapilot=str(dp).upper() if dp else None,
                 action=action,
-                allowed=bool(getattr(data, "allowed", False)),
+                allowed=allowed,
                 rule_id=getattr(data, "rule_id", None),
                 reason=str(getattr(data, "reason", "")),
                 risk=getattr(data, "risk", None),
@@ -279,10 +300,12 @@ class WriteGateSQLGuardClient:
         if isinstance(data, dict):
             dp = data.get("datapilot")
             action = str(data.get("action") or "").upper()
+            # Tri-state: only coerce when key present; absent stays None
             if "allowed" in data:
-                allowed = bool(data.get("allowed"))
+                av = data.get("allowed")
+                allowed = None if av is None else bool(av)
             else:
-                allowed = (str(dp).upper() == "EXECUTE") or action == "ALLOW"
+                allowed = None
             return self._from_fields(
                 datapilot=str(dp).upper() if dp else None,
                 action=action,
@@ -309,7 +332,7 @@ class WriteGateSQLGuardClient:
         *,
         datapilot: str | None,
         action: str,
-        allowed: bool,
+        allowed: bool | None,
         rule_id: Any,
         reason: str,
         risk: Any,
@@ -321,6 +344,11 @@ class WriteGateSQLGuardClient:
         rowcount: Any = None,
         columns: Any = None,
     ) -> GateResult:
+        """Map gate fields to GateResult with reject-first consistency.
+
+        Contradictions (datapilot vs action vs allowed) always BLOCK — never
+        upgrade to ALLOW/EXECUTE. Only consistent EXECUTE/ALLOW paths allow.
+        """
         verb = (datapilot or "").upper()
         action_u = (action or "").upper()
         cols = list(columns) if isinstance(columns, (list, tuple)) else None
@@ -328,32 +356,77 @@ class WriteGateSQLGuardClient:
         rc = int(rowcount) if rowcount is not None else (len(row_list) if row_list is not None else None)
 
         raw_dict = raw if isinstance(raw, dict) else {"payload": raw}
-        # Field contradiction → BLOCK / gate error (do not execute)
-        if verb == "EXECUTE" and (action_u == "BLOCK" or allowed is False):
+        lat = float(latency_ms) if latency_ms is not None else None
+
+        def _block(msg: str, *, rule: str = "field_contradiction") -> GateResult:
             return GateResult.block(
-                reason=reason or "field contradiction: datapilot=EXECUTE but blocked",
-                rule_id=rule_id or "field_contradiction",
+                reason=reason or msg,
+                rule_id=rule_id or rule,
                 risk=str(risk) if risk is not None else "high",
-                raw={**raw_dict, "error": "field_contradiction", "fallback": None},
+                raw={**raw_dict, "error": rule, "fallback": None},
                 datapilot="BLOCK",
                 risk_score=risk_score,
-                latency_ms=float(latency_ms) if latency_ms is not None else None,
+                latency_ms=lat,
             )
 
-        if verb == "EXECUTE" or action_u == "ALLOW":
+        # --- Reject-first: field / protocol contradictions ---
+        # action=ALLOW + allowed=false (any datapilot, including conflicting)
+        if action_u == "ALLOW" and allowed is False:
+            return _block("field contradiction: action=ALLOW but allowed=false")
+        # datapilot=BLOCK + action=ALLOW (+ typically allowed=false already covered)
+        if verb == "BLOCK" and action_u == "ALLOW":
+            return _block("field contradiction: datapilot=BLOCK but action=ALLOW")
+        # datapilot=APPROVAL + action=ALLOW
+        if verb == "APPROVAL" and action_u == "ALLOW":
+            return _block("field contradiction: datapilot=APPROVAL but action=ALLOW")
+        # datapilot=EXECUTE + action=BLOCK or allowed=false
+        if verb == "EXECUTE" and (action_u == "BLOCK" or allowed is False):
+            return _block("field contradiction: datapilot=EXECUTE but blocked")
+        # datapilot=EXECUTE + action=REQUIRE_APPROVAL (allowed missing or otherwise)
+        if verb == "EXECUTE" and action_u in ("REQUIRE_APPROVAL", "APPROVAL"):
+            return _block(
+                "field contradiction: datapilot=EXECUTE but action=REQUIRE_APPROVAL"
+            )
+        # datapilot=BLOCK/APPROVAL with allowed=true while claiming execute-ish action
+        if verb in ("BLOCK", "APPROVAL") and allowed is True and action_u == "ALLOW":
+            return _block(
+                f"field contradiction: datapilot={verb} but allowed=true/action=ALLOW"
+            )
+
+        # --- Consistent ALLOW / EXECUTE only ---
+        # Happy: datapilot=EXECUTE + action=ALLOW + allowed!=false
+        # Or: datapilot=EXECUTE + allowed true/absent + action empty or ALLOW
+        if verb == "EXECUTE" and allowed is not False and action_u in ("", "ALLOW"):
             return GateResult.allow(
                 reason=reason or "ok",
                 rule_id=rule_id,
                 raw={**raw_dict, "fallback": None},
                 datapilot="EXECUTE",
                 risk_score=risk_score,
-                latency_ms=float(latency_ms) if latency_ms is not None else None,
+                latency_ms=lat,
                 risk=str(risk) if risk is not None else "low",
                 executed=bool(executed),
                 rows=row_list,
                 rowcount=rc,
                 columns=cols,
             )
+        # No datapilot verb: action=ALLOW + allowed!=false is consistent allow
+        if not verb and action_u == "ALLOW" and allowed is not False:
+            return GateResult.allow(
+                reason=reason or "ok",
+                rule_id=rule_id,
+                raw={**raw_dict, "fallback": None},
+                datapilot="EXECUTE",
+                risk_score=risk_score,
+                latency_ms=lat,
+                risk=str(risk) if risk is not None else "low",
+                executed=bool(executed),
+                rows=row_list,
+                rowcount=rc,
+                columns=cols,
+            )
+
+        # Consistent APPROVAL (not mixed with ALLOW/EXECUTE — those rejected above)
         if verb == "APPROVAL" or action_u in ("REQUIRE_APPROVAL", "APPROVAL"):
             return GateResult.require_approval(
                 reason=reason or "approval required",
@@ -361,9 +434,10 @@ class WriteGateSQLGuardClient:
                 raw={**raw_dict, "fallback": None},
                 datapilot="APPROVAL",
                 risk_score=risk_score,
-                latency_ms=float(latency_ms) if latency_ms is not None else None,
+                latency_ms=lat,
                 risk=str(risk) if risk is not None else "medium",
             )
+
         if not verb:
             verb = "BLOCK"
         return GateResult.block(
@@ -373,5 +447,5 @@ class WriteGateSQLGuardClient:
             raw={**raw_dict, "fallback": None},
             datapilot=verb if verb in ("BLOCK", "EXECUTE", "APPROVAL") else "BLOCK",
             risk_score=risk_score,
-            latency_ms=float(latency_ms) if latency_ms is not None else None,
+            latency_ms=lat,
         )
