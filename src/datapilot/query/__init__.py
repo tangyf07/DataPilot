@@ -6,6 +6,7 @@ from datapilot.query.engine import (
     QueryResult,
     build_engine,
     query_result_from_gate_rows,
+    columns_from_select,
 )
 
 __all__ = [
@@ -14,4 +15,5 @@ __all__ = [
     "QueryResult",
     "build_engine",
     "query_result_from_gate_rows",
+    "columns_from_select",
 ]

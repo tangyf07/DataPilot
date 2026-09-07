@@ -119,6 +119,45 @@ def build_engine(
     return DuckDBEngine(db_path or Path("data/datapilot.duckdb"), auto_seed=auto_seed)
 
 
+
+def columns_from_select(sql: str) -> list[str] | None:
+    """Best-effort column names from a simple SELECT list (no nested parens)."""
+    import re
+
+    m = re.search(r"(?is)\bSELECT\s+(.*?)\s+FROM\b", sql.strip())
+    if not m:
+        return None
+    raw = m.group(1).strip()
+    if raw == "*" or not raw:
+        return None
+    cols: list[str] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        # alias: expr AS name / expr name
+        am = re.search(r"(?i)\bas\s+([A-Za-z_][\w$]*)\s*$", part)
+        if am:
+            cols.append(am.group(1))
+            continue
+        tokens = part.split()
+        if len(tokens) >= 2 and re.match(r"^[A-Za-z_][\w$]*$", tokens[-1]) and tokens[-2].lower() != "as":
+            # bare alias after expression
+            if "." in tokens[0] or "(" in part:
+                cols.append(tokens[-1])
+                continue
+        # table.col or col
+        leaf = tokens[-1]
+        if "." in leaf:
+            leaf = leaf.split(".")[-1]
+        leaf = leaf.strip("`\"[]")
+        if re.match(r"^[A-Za-z_][\w$]*$", leaf):
+            cols.append(leaf)
+        else:
+            cols.append(f"c{len(cols)}")
+    return cols or None
+
+
 def query_result_from_gate_rows(
     sql: str,
     rows: list[Any] | None,
@@ -139,7 +178,16 @@ def query_result_from_gate_rows(
                 norm.append(tuple(r))
             else:
                 norm.append((r,))
-    cols = list(columns) if columns else (
-        [f"c{i}" for i in range(len(norm[0]))] if norm else []
-    )
+    cols = list(columns) if columns else None
+    if not cols:
+        cols = columns_from_select(sql)
+    if not cols:
+        cols = [f"c{i}" for i in range(len(norm[0]))] if norm else []
+    # If parsed count mismatches row width, pad/truncate names
+    if norm and len(cols) != len(norm[0]):
+        width = len(norm[0])
+        if len(cols) < width:
+            cols = list(cols) + [f"c{i}" for i in range(len(cols), width)]
+        else:
+            cols = list(cols)[:width]
     return QueryResult(columns=cols, rows=norm, sql=sql, backend="doris", path=path)
