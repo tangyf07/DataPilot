@@ -1,19 +1,21 @@
 # DataPilot
 
-AI 数据工程体系的智能查数层：对接 [GameStream](https://github.com/tangyf07/GameStream) 的 ADS 指标口径，经 [SQLGuard (sql-write-gate)](https://github.com/tangyf07/sql-write-gate) 门禁后查数解释。不是裸 Text2SQL / 普通 ChatBI 作业。
+可选查数层（**optional integration**）：对接 [GameStream](https://github.com/tangyf07/GameStream) 的 ADS 指标口径，经 [SQLGuard](https://github.com/tangyf07/SQLGuard) 门禁后查数解释。不是裸 Text2SQL / 普通 ChatBI 作业。
 
-## 三件套架构
+> 秋招主叙事是 [RetailDW](https://github.com/tangyf07/RetailDW) → [GameStream](https://github.com/tangyf07/GameStream) → [SQLGuard](https://github.com/tangyf07/SQLGuard)。本仓**冻结功能开发**，不占主简历独立项目位。
+
+## 可选集成架构
 
 ```mermaid
 flowchart LR
   GS[GameStream<br/>实时湖仓 ADS] --> DP[DataPilot<br/>智能查数层]
-  DP -->|SQL| SG[SQLGuard<br/>sql-write-gate]
+  DP -->|SQL| SG[SQLGuard]
   SG -->|EXECUTE| DB[(DuckDB / Doris)]
   SG -->|BLOCK| R[反馈重试]
   R --> DP
 ```
 
-（与网易秋招三件套同一叙事：GameStream 出数 → DataPilot 问数 → SQLGuard 护栏。）
+（可选集成：GameStream 出数 → DataPilot 问数 → SQLGuard 护栏。主项目包不含本仓。）
 
 ## 闭环
 
@@ -49,7 +51,7 @@ pytest -q
 
 ## G7：ChatBI → SQLGuard → GameStream Doris ADS
 
-三件套真实链路（无 UI）：DataPilot 生成 ADS SQL → **SQLGuard 1.1** `block_or_execute(execute=True)` → Doris FE（MySQL 协议）查 `ads` 库。
+可选集成真实链路（无 UI）：DataPilot 生成 ADS SQL → **SQLGuard 1.1** `block_or_execute(execute=True)` → Doris FE（MySQL 协议）查 `ads` 库。
 
 **Live Doris demo evidence:** the G7 demo ran **two SELECTs each returning 8 rows** (DAU + pay_rate). That live demo is separate from offline unit tests — **`pytest passed` is not proof of Doris integration**.
 
@@ -115,5 +117,5 @@ Gold-question offline harness (four heuristic metrics): [`evals/`](./evals/) —
 
 ## English
 
-DataPilot is the intelligent query layer in an AI data-eng suite: it consumes GameStream ADS metric contracts (`metric_id` / table names), gates SQL via SQLGuard (`sql-write-gate`), then explains results. Not bare Text2SQL / ChatBI homework.
+DataPilot is an **optional** query layer over GameStream ADS metric contracts (`metric_id` / table names), gated by SQLGuard, then explains results. Not bare Text2SQL / ChatBI homework. Primary autumn-recruit narrative is RetailDW → GameStream → SQLGuard; this repo is frozen for feature work.
 
